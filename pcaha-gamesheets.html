@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a1580">
+<title>PCAHA Game Sheets</title>
+<style>
+:root{
+  --bg:#f3f4f8; --surface:#ffffff; --surface-2:#eef0f7; --text:#12162b; --muted:#5b6178;
+  --line:#dde0ea; --accent:#0a1580; --accent-ink:#ffffff; --accent-soft:#e3e6fb;
+  --win:#1f7a4a; --loss:#b3261e; --tie:#8a6d00; --live:#d92d20;
+  --radius:14px; --shadow:0 1px 2px rgba(16,24,64,.06),0 2px 8px rgba(16,24,64,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d0f1a; --surface:#171a2a; --surface-2:#1f2336; --text:#e9ebf5; --muted:#9aa0b8;
+    --line:#2a2f47; --accent:#8e9bff; --accent-ink:#0d0f1a; --accent-soft:#232a55;
+    --win:#4fc38a; --loss:#ff7b72; --tie:#e0c050; --live:#ff5a4f; --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d0f1a; --surface:#171a2a; --surface-2:#1f2336; --text:#e9ebf5; --muted:#9aa0b8;
+  --line:#2a2f47; --accent:#8e9bff; --accent-ink:#0d0f1a; --accent-soft:#232a55;
+  --win:#4fc38a; --loss:#ff7b72; --tie:#e0c050; --live:#ff5a4f; --shadow:none;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+button,select,input{font:inherit;color:inherit}
+a{color:inherit}
+.wrap{max-width:760px;margin:0 auto;padding:0 16px}
+
+/* header */
+.top{background:#0a1580;color:#fff;padding:18px 0 14px;padding-top:max(18px,env(safe-area-inset-top))}
+.top .wrap{display:flex;align-items:center;gap:12px}
+.top h1{margin:0;font-size:20px;letter-spacing:.2px}
+.top .sub{font-size:13px;opacity:.8;margin-top:2px}
+.top .grow{flex:1;min-width:0}
+.iconbtn{background:rgba(255,255,255,.12);border:0;border-radius:10px;width:40px;height:40px;display:grid;place-items:center;cursor:pointer;color:#fff}
+.iconbtn:hover{background:rgba(255,255,255,.2)}
+.iconbtn svg{width:20px;height:20px}
+.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* controls */
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:14px 0 10px}
+.field{display:flex;flex-direction:column;gap:3px;min-width:0}
+.field label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
+.field select,.field input{width:100%;min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:9px 10px;appearance:none;-webkit-appearance:none}
+.field select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 16px) 55%,calc(100% - 11px) 55%;background-size:5px 5px;background-repeat:no-repeat;padding-right:28px}
+.field.full{grid-column:1/-1}
+.field.team select{border-color:var(--accent);font-weight:600}
+
+/* tabs */
+.tabs{display:flex;gap:4px;background:var(--surface-2);border-radius:12px;padding:4px;position:sticky;top:0;z-index:5;margin-bottom:12px}
+.tabs button{flex:1;border:0;background:transparent;padding:9px 6px;border-radius:9px;cursor:pointer;font-weight:600;color:var(--muted)}
+.tabs button[aria-selected="true"]{background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+.tabs .count{font-weight:500;opacity:.7;font-size:12px;margin-left:4px}
+
+/* summary strip */
+.summary{display:flex;gap:10px;align-items:center;background:var(--accent-soft);border-radius:var(--radius);padding:12px 14px;margin-bottom:12px}
+.summary .rec{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.summary .lbl{font-size:12px;color:var(--muted)}
+.summary .next{margin-left:auto;text-align:right;font-size:13px;min-width:0}
+.summary .next b{display:block}
+
+/* day groups & games */
+.day{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);margin:18px 2px 8px}
+.day:first-child{margin-top:4px}
+.game{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px;box-shadow:var(--shadow)}
+.game.mine{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.game.cancelled{opacity:.6}
+.meta{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-bottom:8px;flex-wrap:wrap}
+.meta time{font-weight:600;color:var(--text)}
+.badge{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:999px;background:var(--surface-2);color:var(--muted)}
+.badge.final{background:var(--surface-2);color:var(--text)}
+.badge.live{background:var(--live);color:#fff}
+.badge.cancel{background:transparent;border:1px solid var(--loss);color:var(--loss)}
+.badge.res-W{background:var(--win);color:#fff}.badge.res-L{background:var(--loss);color:#fff}.badge.res-T{background:var(--tie);color:#fff}
+.meta .right{margin-left:auto;display:flex;gap:6px;align-items:center}
+.trow{display:flex;align-items:center;gap:10px;padding:4px 0}
+.trow img,.trow .ph{width:28px;height:28px;border-radius:6px;object-fit:contain;background:#fff;flex:none;border:1px solid var(--line)}
+.trow .ph{background:var(--surface-2)}
+.trow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trow .ha{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;flex:none}
+.trow .sc{font-size:20px;font-weight:700;min-width:28px;text-align:right;font-variant-numeric:tabular-nums}
+.trow.me .nm{font-weight:700;color:var(--accent)}
+.trow.lose .sc{color:var(--muted);font-weight:500}
+.venue{font-size:13px;color:var(--muted);margin-top:6px;display:flex;gap:6px;align-items:flex-start}
+.venue a{color:var(--muted);text-decoration:none}
+.venue a:hover{text-decoration:underline}
+.venue svg{width:14px;height:14px;flex:none;margin-top:2px}
+.actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:6px;border-radius:10px;padding:8px 12px;text-decoration:none;font-weight:600;font-size:14px;border:1px solid var(--line);background:var(--surface);cursor:pointer}
+.btn svg{width:16px;height:16px}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.primary:hover{filter:brightness(1.1)}
+.btn:not(.primary):hover{background:var(--surface-2)}
+
+/* standings */
+.sched-h{font-size:14px;font-weight:700;margin:6px 2px 8px}
+.tablewrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow-x:auto;margin-bottom:16px;box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:9px 8px;text-align:right;white-space:nowrap}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface)}
+td{border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:0}
+th.t,td.t{text-align:left;white-space:normal;min-width:150px}
+td.rk{color:var(--muted);width:32px}
+td.pts{font-weight:700}
+tr.me td{background:var(--accent-soft)}
+tr.me td.t{font-weight:700;color:var(--accent)}
+tbody tr{cursor:pointer}
+
+/* misc */
+.empty,.error{text-align:center;color:var(--muted);padding:40px 16px}
+.error{color:var(--loss)}
+.notice{font-size:13px;background:var(--surface-2);border-radius:10px;padding:8px 12px;margin-bottom:10px;color:var(--muted)}
+.skel{height:120px;border-radius:var(--radius);background:linear-gradient(90deg,var(--surface) 0%,var(--surface-2) 50%,var(--surface) 100%);background-size:200% 100%;animation:sh 1.2s infinite;margin-bottom:10px;border:1px solid var(--line)}
+@keyframes sh{to{background-position:-200% 0}}
+.more{display:block;width:100%;margin:6px 0 14px;justify-content:center}
+footer{font-size:12px;color:var(--muted);text-align:center;padding:20px 16px calc(28px + env(safe-area-inset-bottom))}
+footer a{color:var(--muted)}
+.themebtn{background:none;border:0;color:var(--muted);text-decoration:underline;cursor:pointer;font-size:12px;padding:0}
+@media (min-width:640px){.controls{grid-template-columns:1fr 1fr 1.3fr}.field.full{grid-column:auto}.field.search{grid-column:1/-1}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><ellipse cx="17" cy="20" rx="13" ry="6" fill="#fff" opacity=".95"/><ellipse cx="17" cy="16" rx="13" ry="6" fill="#fff"/><ellipse cx="17" cy="16" rx="13" ry="6" fill="none" stroke="#0a1580" stroke-width="1.5"/></svg>
+    <div class="grow">
+      <h1>Game Sheets</h1>
+      <div class="sub" id="sub">PCAHA A</div>
+    </div>
+    <button class="iconbtn" id="refresh" title="Refresh" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="controls">
+    <div class="field"><label for="cat">Division</label><select id="cat"></select></div>
+    <div class="field"><label for="sch">Schedule</label><select id="sch"></select></div>
+    <div class="field full team"><label for="team">My team</label><select id="team"><option value="">All teams</option></select></div>
+    <div class="field full search"><label for="q">Search</label><input id="q" type="search" placeholder="Team, arena or game #" autocomplete="off"></div>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button role="tab" data-tab="results" aria-selected="true">Results<span class="count" id="c-results"></span></button>
+    <button role="tab" data-tab="upcoming" aria-selected="false">Upcoming<span class="count" id="c-upcoming"></span></button>
+    <button role="tab" data-tab="standings" aria-selected="false">Standings</button>
+  </div>
+
+  <div id="summary"></div>
+  <div id="notice"></div>
+  <div id="list"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+</main>
+
+<footer>
+  <div id="updated"></div>
+  <div style="margin-top:6px">Data from the public PCAHA A Spordle page · Game sheets from <a href="https://pdf.hisports.app" target="_blank" rel="noopener">hisports</a> · <button class="themebtn" id="theme">Theme: auto</button></div>
+</footer>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------- config ---------- */
+const API = 'https://pub-api.play.spordle.com/api/sp';
+// Public, read-only key published by page.spordle.com itself.
+const API_KEY = 'f08ed9064e3cdc382e6abb305ff543d0150fb52f';
+const OFFICE_ID = 786;                                   // PCAHA A
+const PAGE_SHORT = 'pcaha-a';
+const DEFAULT_CATEGORY = '599ab4b2-6f05-48eb-99bd-9f6b80810e12'; // U13 A
+const SHEET_URL = id => `https://pdf.hisports.app/game/${id}`;
+const GAME_URL  = id => `https://page.spordle.com/${PAGE_SHORT}/schedule/${id}`;
+const TEAM_URL  = id => `https://page.spordle.com/${PAGE_SHORT}/teams/${id}`;
+const PAGE_SIZE = 40;
+
+/* ---------- storage (best-effort) ---------- */
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('pcaha:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('pcaha:' + k, JSON.stringify(v)); } catch {} }
+};
+
+/* ---------- state ---------- */
+const S = {
+  season: null, categories: [], schedules: [],
+  categoryId: store.get('categoryId', DEFAULT_CATEGORY),
+  scheduleId: store.get('scheduleId', 'all'),
+  teamId: store.get('teamId', ''),
+  tab: store.get('tab', 'results'),
+  q: '',
+  games: [], standings: {}, loadedAt: null, offline: false,
+  shown: PAGE_SIZE,
+};
+
+const $ = s => document.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') n.className = v; else if (k === 'html') n.innerHTML = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : document.createTextNode(c));
+  return n;
+};
+
+/* ---------- api ---------- */
+async function api(path, filter) {
+  let url = API + path;
+  if (filter) url += (path.includes('?') ? '&' : '?') + 'filter=' + encodeURIComponent(JSON.stringify(filter));
+  const r = await fetch(url, { headers: { Authorization: 'API-Key ' + API_KEY } });
+  if (!r.ok) throw new Error(`Spordle API returned ${r.status}`);
+  return r.json();
+}
+
+/* ---------- time helpers ---------- */
+const TZ = 'America/Vancouver';
+const fmt = (d, o) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ, ...o }).format(d);
+const dayKey = d => fmt(d, { year: 'numeric', month: '2-digit', day: '2-digit' });
+function dayLabel(d) {
+  const now = new Date(), k = dayKey(d);
+  if (k === dayKey(now)) return 'Today';
+  if (k === dayKey(new Date(now.getTime() + 864e5))) return 'Tomorrow';
+  if (k === dayKey(new Date(now.getTime() - 864e5))) return 'Yesterday';
+  return fmt(d, { weekday: 'long', month: 'long', day: 'numeric' });
+}
+const timeStr = d => fmt(d, { hour: 'numeric', minute: '2-digit' }).replace(/\s?([ap])\.?m\.?/i, (_, a) => ' ' + a.toUpperCase() + 'M');
+const shortDate = d => fmt(d, { weekday: 'short', month: 'short', day: 'numeric' });
+
+/* ---------- game model ---------- */
+function status(g) {
+  const now = Date.now(), st = new Date(g.startTime).getTime(), en = new Date(g.endTime || g.startTime).getTime();
+  if (g.status && g.status !== 'Active') return 'cancelled';
+  if (g.isLive) return 'live';
+  if (st > now) return 'upcoming';
+  if (g.score && Object.keys(g.score).length) return 'final';
+  if (en > now) return 'live';
+  return 'pending';
+}
+const scoreOf = (g, teamId) => g.score && g.score[teamId] != null ? g.score[teamId] : null;
+const teamName = t => t ? (t.shortName || t.name) : 'TBA';
+function resultFor(g, teamId) {
+  const me = scoreOf(g, teamId), opp = scoreOf(g, teamId === g.homeTeamId ? g.awayTeamId : g.homeTeamId);
+  if (me == null || opp == null) return null;
+  return me > opp ? 'W' : me < opp ? 'L' : 'T';
+}
+
+/* ---------- loading ---------- */
+async function boot() {
+  applyTheme(store.get('theme', 'auto'));
+  setBusy(true);
+  try {
+    const seasons = await api(`/seasons?officeId=${OFFICE_ID}`);
+    S.season = (seasons.find(s => s.isCurrent) || seasons[0]).seasonId;
+    const [cats, scheds] = await Promise.all([
+      api(`/categories?officeId=${OFFICE_ID}&seasonId=${S.season}`),
+      api(`/schedules?officeId=${OFFICE_ID}&seasonId=${S.season}`)
+    ]);
+    S.categories = cats.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
+    S.schedules = scheds.sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
+    if (!S.categories.some(c => c.id === S.categoryId)) S.categoryId = (S.categories.find(c => c.id === DEFAULT_CATEGORY) || S.categories[0]).id;
+    fillSelectors();
+    await loadGames();
+  } catch (e) {
+    setBusy(false);
+    if (!restoreCache()) showError(e);
+  }
+}
+
+function schedulesForCategory() { return S.schedules.filter(s => s.categoryId === S.categoryId); }
+
+async function loadGames() {
+  setBusy(true);
+  const scheds = schedulesForCategory();
+  const ids = S.scheduleId === 'all' ? scheds.map(s => s.id) : [Number(S.scheduleId)];
+  if (!ids.length) { S.games = []; S.standings = {}; setBusy(false); render(); return; }
+  try {
+    const [games, ...stand] = await Promise.all([
+      api('/games', { where: { scheduleId: { inq: ids } }, include: ['homeTeam', 'awayTeam', 'surface'], order: ['startTime ASC', 'number ASC'] }),
+      ...ids.map(id => api(`/schedules/${id}/teamStats`, { where: { team: { name: { neq: 'TBA' } } }, include: ['team'] }).catch(() => []))
+    ]);
+    S.games = games;
+    S.standings = Object.fromEntries(ids.map((id, i) => [id, stand[i]]));
+    S.loadedAt = new Date(); S.offline = false;
+    store.set('cache', { key: cacheKey(), games: S.games, standings: S.standings, at: S.loadedAt.toISOString(), schedules: S.schedules, categories: S.categories, season: S.season });
+  } catch (e) {
+    if (!restoreCache()) { setBusy(false); showError(e); return; }
+  }
+  setBusy(false);
+  fillTeams();
+  render();
+}
+
+const cacheKey = () => S.categoryId + '|' + S.scheduleId;
+function restoreCache() {
+  const c = store.get('cache', null);
+  if (!c || c.key !== cacheKey()) return false;
+  Object.assign(S, { games: c.games, standings: c.standings, loadedAt: new Date(c.at), offline: true });
+  if (!S.schedules.length) { S.schedules = c.schedules || []; S.categories = c.categories || []; S.season = c.season; fillSelectors(); }
+  fillTeams(); render();
+  return true;
+}
+
+/* ---------- selectors ---------- */
+function fillSelectors() {
+  const cat = $('#cat'); cat.replaceChildren(...S.categories.map(c => el('option', { value: c.id }, c.name)));
+  cat.value = S.categoryId;
+  fillSchedules();
+  const c = S.categories.find(c => c.id === S.categoryId);
+  $('#sub').textContent = `PCAHA A · ${c ? c.name : ''} · ${S.season || ''}`;
+}
+function fillSchedules() {
+  const scheds = schedulesForCategory();
+  const sel = $('#sch');
+  sel.replaceChildren(el('option', { value: 'all' }, scheds.length > 1 ? `All schedules (${scheds.length})` : 'All schedules'),
+    ...scheds.map(s => el('option', { value: String(s.id) }, s.name)));
+  if (S.scheduleId !== 'all' && !scheds.some(s => String(s.id) === String(S.scheduleId))) S.scheduleId = 'all';
+  sel.value = String(S.scheduleId);
+}
+function fillTeams() {
+  const map = new Map();
+  for (const g of S.games) for (const t of [g.homeTeam, g.awayTeam]) if (t && !/^tba$/i.test(t.name)) map.set(t.id, t);
+  for (const rows of Object.values(S.standings)) for (const r of rows || []) if (r.team) map.set(r.team.id, r.team);
+  const teams = [...map.values()].sort((a, b) => teamName(a).localeCompare(teamName(b), 'en', { numeric: true }));
+  const sel = $('#team');
+  sel.replaceChildren(el('option', { value: '' }, 'All teams'), ...teams.map(t => el('option', { value: String(t.id), title: t.name }, teamName(t))));
+  if (S.teamId && !map.has(Number(S.teamId))) { /* keep preference; team may belong to another division */ sel.value = ''; }
+  else sel.value = String(S.teamId || '');
+}
+
+/* ---------- filtering ---------- */
+function filtered() {
+  const tid = Number($('#team').value) || null;
+  const q = S.q.trim().toLowerCase();
+  return S.games.filter(g => {
+    if (tid && g.homeTeamId !== tid && g.awayTeamId !== tid) return false;
+    if (!q) return true;
+    const v = g.surface && g.surface.venue;
+    return [g.number, g.id, g.homeTeam && g.homeTeam.name, g.homeTeam && g.homeTeam.shortName, g.awayTeam && g.awayTeam.name,
+      g.awayTeam && g.awayTeam.shortName, v && v.name, v && v.city].some(x => x != null && String(x).toLowerCase().includes(q));
+  });
+}
+
+/* ---------- render ---------- */
+function render() {
+  document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === S.tab)));
+  const games = filtered();
+  const upcoming = games.filter(g => { const s = status(g); return s === 'upcoming' || s === 'live' || (s === 'cancelled' && new Date(g.startTime) > new Date()); });
+  const now = new Date();
+  const results = games.filter(g => new Date(g.startTime) <= now).reverse();
+  $('#c-upcoming').textContent = upcoming.length ? upcoming.length : '';
+  $('#c-results').textContent = results.length ? results.length : '';
+
+  renderSummary(games, upcoming);
+  $('#notice').replaceChildren(S.offline ? el('div', { class: 'notice' }, `Offline — showing saved data from ${shortDate(S.loadedAt)} ${timeStr(S.loadedAt)}.`) : '');
+  $('#updated').textContent = S.loadedAt ? `Updated ${shortDate(S.loadedAt)}, ${timeStr(S.loadedAt)}` : '';
+
+  const list = $('#list');
+  if (S.tab === 'standings') return list.replaceChildren(renderStandings());
+  const src = S.tab === 'upcoming' ? upcoming : results;
+  if (!src.length) return list.replaceChildren(el('div', { class: 'empty' },
+    S.tab === 'upcoming' ? 'No upcoming games scheduled yet.' : 'No games played yet.'));
+  const out = []; let lastDay = null;
+  for (const g of src.slice(0, S.shown)) {
+    const d = new Date(g.startTime), k = dayKey(d);
+    if (k !== lastDay) { out.push(el('div', { class: 'day' }, dayLabel(d))); lastDay = k; }
+    out.push(gameCard(g));
+  }
+  if (src.length > S.shown) out.push(el('button', { class: 'btn more', onclick: () => { S.shown += PAGE_SIZE; render(); } }, `Show more (${src.length - S.shown} left)`));
+  list.replaceChildren(...out);
+}
+
+function renderSummary(games, upcoming) {
+  const tid = Number($('#team').value) || null;
+  const box = $('#summary');
+  if (!tid) return box.replaceChildren();
+  // Prefer the league's official standings record (it excludes games that don't count);
+  // fall back to tallying final scores ourselves.
+  let w = 0, l = 0, t = 0, pts = null;
+  const rows = Object.values(S.standings).flat().filter(r => r && r.teamId === tid);
+  if (rows.length) { for (const r of rows) { w += r.wins || 0; l += r.losses || 0; t += r.ties || 0; pts = (pts || 0) + (r.points || 0); } }
+  else for (const g of games) { const r = status(g) === 'final' ? resultFor(g, tid) : null; if (r === 'W') w++; else if (r === 'L') l++; else if (r === 'T') t++; }
+  const next = upcoming.find(g => status(g) === 'upcoming');
+  const live = upcoming.find(g => status(g) === 'live');
+  const n = live || next;
+  const opp = n ? (n.homeTeamId === tid ? n.awayTeam : n.homeTeam) : null;
+  box.replaceChildren(el('div', { class: 'summary' },
+    el('div', {}, el('div', { class: 'rec' }, `${w}-${l}-${t}`), el('div', { class: 'lbl' }, pts != null ? `W-L-T · ${pts} pts` : 'W-L-T')),
+    n ? el('div', { class: 'next' }, el('span', { class: 'lbl' }, live ? 'Playing now' : 'Next game'),
+      el('b', {}, `${n.homeTeamId === tid ? 'vs' : '@'} ${teamName(opp)}`),
+      el('span', {}, `${shortDate(new Date(n.startTime))} · ${timeStr(new Date(n.startTime))}`)) : ''));
+}
+
+const ICON_SHEET = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>';
+const ICON_EXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>';
+const ICON_PIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>';
+
+function teamRow(g, team, side, st, tid) {
+  const id = side === 'home' ? g.homeTeamId : g.awayTeamId;
+  const oppId = side === 'home' ? g.awayTeamId : g.homeTeamId;
+  const sc = scoreOf(g, id), osc = scoreOf(g, oppId);
+  const showScore = (st === 'final' || st === 'live') && sc != null;
+  const logo = team && team.logoUrl
+    ? el('img', { src: team.logoUrl, alt: '', loading: 'lazy', onerror: e => e.target.replaceWith(el('span', { class: 'ph' })) })
+    : el('span', { class: 'ph' });
+  return el('div', { class: 'trow' + (tid === id ? ' me' : '') + (st === 'final' && sc != null && osc != null && sc < osc ? ' lose' : '') },
+    logo, el('span', { class: 'nm', title: team ? team.name : 'TBA' }, teamName(team)),
+    el('span', { class: 'ha' }, side), el('span', { class: 'sc' }, showScore ? String(sc) : ''));
+}
+
+function gameCard(g) {
+  const st = status(g), d = new Date(g.startTime);
+  const tid = Number($('#team').value) || null;
+  const mine = tid && (g.homeTeamId === tid || g.awayTeamId === tid);
+  const res = mine && st === 'final' ? resultFor(g, tid) : null;
+  const badge = { final: el('span', { class: 'badge final' }, 'Final'), live: el('span', { class: 'badge live' }, 'Live'),
+    cancelled: el('span', { class: 'badge cancel' }, g.status || 'Cancelled'), pending: el('span', { class: 'badge' }, 'Score pending'), upcoming: null }[st];
+  const v = g.surface && g.surface.venue;
+  const sn = g.surface && g.surface.name;
+  const rink = !sn || !v || sn === v.name ? '' : /^\d+$/.test(sn) ? ` · Rink ${sn}` : ` (${sn})`;
+  const mapQ = v ? encodeURIComponent([v.name, v.address, v.city].filter(Boolean).join(', ')) : '';
+  const sheetReady = st === 'final' || st === 'live' || st === 'pending';
+
+  return el('article', { class: 'game' + (mine ? ' mine' : '') + (st === 'cancelled' ? ' cancelled' : '') },
+    el('div', { class: 'meta' },
+      el('time', { datetime: g.startTime }, timeStr(d)),
+      el('span', {}, '#' + g.number),
+      el('span', { class: 'right' }, res ? el('span', { class: 'badge res-' + res }, res) : '', badge)),
+    teamRow(g, g.awayTeam, 'away', st, tid),
+    teamRow(g, g.homeTeam, 'home', st, tid),
+    v ? el('div', { class: 'venue', html: ICON_PIN },
+      el('a', { href: `https://www.google.com/maps/search/?api=1&query=${mapQ}`, target: '_blank', rel: 'noopener' }, `${v.name}${rink} — ${v.city || ''}`)) : '',
+    st === 'cancelled' ? '' : el('div', { class: 'actions' },
+      sheetReady ? el('a', { class: 'btn primary', href: SHEET_URL(g.id), target: '_blank', rel: 'noopener', html: ICON_SHEET + '<span>Game sheet</span>' }) : '',
+      el('a', { class: 'btn', href: GAME_URL(g.id), target: '_blank', rel: 'noopener', html: ICON_EXT + '<span>Game page</span>' })));
+}
+
+function renderStandings() {
+  const tid = Number($('#team').value) || null;
+  const scheds = schedulesForCategory().filter(s => S.standings[s.id] && S.standings[s.id].length);
+  if (!scheds.length) return el('div', { class: 'empty' }, 'No standings available yet.');
+  const frag = document.createDocumentFragment();
+  for (const s of scheds.slice().reverse()) {
+    const rows = S.standings[s.id].slice().sort((a, b) =>
+      (a.manualRanking ?? a.ranking ?? 999) - (b.manualRanking ?? b.ranking ?? 999) || (b.points - a.points));
+    frag.append(el('div', { class: 'sched-h' }, s.name),
+      el('div', { class: 'tablewrap' }, el('table', {},
+        el('thead', {}, el('tr', {}, ...['#', 'Team', 'GP', 'W', 'L', 'T', 'GF', 'GA', 'Diff', 'SP', 'Pts'].map((h, i) => el('th', { class: i === 1 ? 't' : '', title: h === 'SP' ? 'Sportsmanship points' : null }, h)))),
+        el('tbody', {}, ...rows.map((r, i) => el('tr', { class: r.teamId === tid ? 'me' : '', title: 'Show this team’s games',
+          onclick: () => { $('#team').value = String(r.teamId); onTeam(); S.tab = 'results'; store.set('tab', S.tab); render(); window.scrollTo({ top: 0, behavior: 'smooth' }); } },
+          el('td', { class: 'rk' }, String(r.manualRanking ?? r.ranking ?? i + 1)),
+          el('td', { class: 't' }, r.team ? teamName(r.team) : '—'),
+          el('td', {}, n(r.gamesPlayed)), el('td', {}, n(r.wins)), el('td', {}, n(r.losses)), el('td', {}, n(r.ties)),
+          el('td', {}, n(r.goalFor)), el('td', {}, n(r.goalAgainst)), el('td', {}, r.diff > 0 ? '+' + r.diff : n(r.diff)),
+          el('td', {}, n(r.sportsmanship)), el('td', { class: 'pts' }, n(r.points))))))));
+  }
+  return frag;
+}
+const n = v => v == null ? '0' : String(v);
+
+/* ---------- ui plumbing ---------- */
+function setBusy(b) { $('#refresh').classList.toggle('spin', b); if (b && !S.games.length) $('#list').innerHTML = '<div class="skel"></div><div class="skel"></div><div class="skel"></div>'; }
+function showError(e) {
+  $('#list').replaceChildren(el('div', { class: 'error' }, 'Couldn’t load games from Spordle. ', el('br'), el('small', {}, String(e.message || e)),
+    el('div', { style: 'margin-top:12px' }, el('button', { class: 'btn', onclick: () => (S.schedules.length ? loadGames() : boot()) }, 'Try again'))));
+}
+function onTeam() { S.teamId = $('#team').value; store.set('teamId', S.teamId); S.shown = PAGE_SIZE; }
+
+$('#cat').addEventListener('change', e => { S.categoryId = e.target.value; store.set('categoryId', S.categoryId); S.scheduleId = 'all'; store.set('scheduleId', 'all'); fillSelectors(); S.games = []; loadGames(); });
+$('#sch').addEventListener('change', e => { S.scheduleId = e.target.value; store.set('scheduleId', S.scheduleId); loadGames(); });
+$('#team').addEventListener('change', () => { onTeam(); render(); });
+$('#q').addEventListener('input', e => { S.q = e.target.value; S.shown = PAGE_SIZE; render(); });
+$('#refresh').addEventListener('click', () => (S.schedules.length ? loadGames() : boot()));
+document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => { S.tab = b.dataset.tab; store.set('tab', S.tab); S.shown = PAGE_SIZE; render(); }));
+
+function applyTheme(t) {
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
+  $('#theme').textContent = 'Theme: ' + t;
+}
+$('#theme').addEventListener('click', () => { const order = ['auto', 'light', 'dark']; const t = order[(order.indexOf(store.get('theme', 'auto')) + 1) % 3]; store.set('theme', t); applyTheme(t); });
+
+// refresh when returning to the tab after a while (e.g. between periods)
+document.addEventListener('visibilitychange', () => { if (!document.hidden && S.loadedAt && Date.now() - S.loadedAt > 5 * 60e3) loadGames(); });
+
+boot();
+})();
+</script>
+</body>
+</html>
