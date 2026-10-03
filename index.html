@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a1580">
-<title>PCAHA Game Sheets</title>
+<title>Hockey Game Sheets</title>
 <style>
 :root{
   --bg:#f3f4f8; --surface:#ffffff; --surface-2:#eef0f7; --text:#12162b; --muted:#5b6178;
@@ -123,7 +123,7 @@ tbody tr{cursor:pointer}
 footer{font-size:12px;color:var(--muted);text-align:center;padding:20px 16px calc(28px + env(safe-area-inset-bottom))}
 footer a{color:var(--muted)}
 .themebtn{background:none;border:0;color:var(--muted);text-decoration:underline;cursor:pointer;font-size:12px;padding:0}
-@media (min-width:640px){.controls{grid-template-columns:1fr 1fr 1.3fr}.field.full{grid-column:auto}.field.search{grid-column:1/-1}}
+@media (min-width:640px){.controls{grid-template-columns:1fr 1fr 1fr 1.3fr}.field.full{grid-column:auto}.field.search{grid-column:1/-1}}
 </style>
 </head>
 <body>
@@ -142,9 +142,10 @@ footer a{color:var(--muted)}
 
 <main class="wrap">
   <div class="controls">
+    <div class="field"><label for="league">League</label><select id="league"></select></div>
     <div class="field"><label for="cat">Division</label><select id="cat"></select></div>
     <div class="field"><label for="sch">Schedule</label><select id="sch"></select></div>
-    <div class="field full team"><label for="team">My team</label><select id="team"><option value="">All teams</option></select></div>
+    <div class="field team"><label for="team">My team</label><select id="team"><option value="">All teams</option></select></div>
     <div class="field full search"><label for="q">Search</label><input id="q" type="search" placeholder="Team, arena or game #" autocomplete="off"></div>
   </div>
 
@@ -161,7 +162,7 @@ footer a{color:var(--muted)}
 
 <footer>
   <div id="updated"></div>
-  <div style="margin-top:6px">Data from the public PCAHA A Spordle page · Game sheets from <a href="https://pdf.hisports.app" target="_blank" rel="noopener">hisports</a> · <button class="themebtn" id="theme">Theme: auto</button></div>
+  <div style="margin-top:6px">Data from the public <a id="src" href="https://page.spordle.com/pcaha-a" target="_blank" rel="noopener">PCAHA A</a> Spordle page · Game sheets from <a href="https://pdf.hisports.app" target="_blank" rel="noopener">hisports</a> · <button class="themebtn" id="theme">Theme: auto</button></div>
 </footer>
 
 <script>
@@ -172,12 +173,18 @@ footer a{color:var(--muted)}
 const API = 'https://pub-api.play.spordle.com/api/sp';
 // Public, read-only key published by page.spordle.com itself.
 const API_KEY = 'f08ed9064e3cdc382e6abb305ff543d0150fb52f';
-const OFFICE_ID = 786;                                   // PCAHA A
-const PAGE_SHORT = 'pcaha-a';
-const DEFAULT_CATEGORY = '599ab4b2-6f05-48eb-99bd-9f6b80810e12'; // U13 A
+// Each league is a Spordle "office". To add another league, add an entry here.
+//  - officeId: Spordle office id, if known.
+//  - probeScheduleId / nameLike: used to look the office id up automatically when it isn't known.
+const LEAGUES = [
+  { key: 'pcaha', name: 'PCAHA A', short: 'pcaha-a', officeId: 786,
+    defaultCategory: '599ab4b2-6f05-48eb-99bd-9f6b80810e12' /* U13 A */ },
+  { key: 'pcehl', name: 'PCEHL', short: 'pacific-coast-elite-hockey-league', officeId: null,
+    nameLike: ['%Pacific Coast Elite%', '%PCEHL%', '%Coast Elite%'], nameMatch: /pacific coast elite|pcehl/i,
+    defaultCategoryMatch: /U13/i },
+];
 const SHEET_URL = id => `https://pdf.hisports.app/game/${id}`;
-const GAME_URL  = id => `https://page.spordle.com/${PAGE_SHORT}/schedule/${id}`;
-const TEAM_URL  = id => `https://page.spordle.com/${PAGE_SHORT}/teams/${id}`;
+const GAME_URL  = id => `https://page.spordle.com/${L().short}/schedule/${id}`;
 const PAGE_SIZE = 40;
 
 /* ---------- storage (best-effort) ---------- */
@@ -185,18 +192,30 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem('pcaha:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem('pcaha:' + k, JSON.stringify(v)); } catch {} }
 };
+// Per-league preferences (PCAHA falls back to the keys used before leagues existed).
+const pref = {
+  get(k, d) { const v = store.get(S.league + ':' + k, undefined); return v !== undefined ? v : (S.league === 'pcaha' ? store.get(k, d) : d); },
+  set(k, v) { store.set(S.league + ':' + k, v); }
+};
 
 /* ---------- state ---------- */
 const S = {
-  season: null, categories: [], schedules: [],
-  categoryId: store.get('categoryId', DEFAULT_CATEGORY),
-  scheduleId: store.get('scheduleId', 'all'),
-  teamId: store.get('teamId', ''),
+  league: LEAGUES.some(l => l.key === store.get('league', 'pcaha')) ? store.get('league', 'pcaha') : 'pcaha',
+  officeId: null, season: null, categories: [], schedules: [],
+  categoryId: null, scheduleId: 'all', teamId: '',
   tab: store.get('tab', 'results'),
   q: '',
   games: [], standings: {}, loadedAt: null, offline: false,
   shown: PAGE_SIZE,
 };
+
+const L = () => LEAGUES.find(l => l.key === S.league);
+function loadPrefs() {
+  S.categoryId = pref.get('categoryId', L().defaultCategory || null);
+  S.scheduleId = pref.get('scheduleId', 'all');
+  S.teamId = pref.get('teamId', '');
+}
+loadPrefs();
 
 const $ = s => document.querySelector(s);
 const el = (tag, attrs = {}, ...kids) => {
@@ -252,19 +271,47 @@ function resultFor(g, teamId) {
 }
 
 /* ---------- loading ---------- */
+// Find the league's Spordle office id (cached after the first successful lookup).
+async function resolveOffice(lg) {
+  if (lg.officeId) return lg.officeId;
+  const cached = store.get('office:' + lg.key, null);
+  if (cached) return cached;
+  const attempts = [];
+  if (lg.probeScheduleId) attempts.push(async () => (await api(`/schedules/${lg.probeScheduleId}`)).officeId);
+  for (const pat of lg.nameLike || []) attempts.push(async () => {
+    const rows = await api('/offices', { where: { name: { like: pat } } });
+    const named = lg.nameMatch ? rows.filter(o => lg.nameMatch.test(o.name || '')) : rows;
+    const leagueRow = named.find(o => /league/i.test(o.type || '')) || named[0];
+    return leagueRow && leagueRow.id;
+  });
+  for (const a of attempts) {
+    try { const id = await a(); if (id) { store.set('office:' + lg.key, id); return id; } } catch {}
+  }
+  throw new Error(`Couldn’t find the ${lg.name} league on Spordle`);
+}
+
 async function boot() {
   applyTheme(store.get('theme', 'auto'));
+  fillLeagues();
+  S.games = []; S.standings = {}; S.categories = []; S.schedules = [];
   setBusy(true);
   try {
-    const seasons = await api(`/seasons?officeId=${OFFICE_ID}`);
+    const lg = L();
+    S.officeId = await resolveOffice(lg);
+    const seasons = await api(`/seasons?officeId=${S.officeId}`);
     S.season = (seasons.find(s => s.isCurrent) || seasons[0]).seasonId;
     const [cats, scheds] = await Promise.all([
-      api(`/categories?officeId=${OFFICE_ID}&seasonId=${S.season}`),
-      api(`/schedules?officeId=${OFFICE_ID}&seasonId=${S.season}`)
+      api(`/categories?officeId=${S.officeId}&seasonId=${S.season}`),
+      api(`/schedules?officeId=${S.officeId}&seasonId=${S.season}`)
     ]);
     S.categories = cats.sort((a, b) => a.name.localeCompare(b.name, 'en', { numeric: true }));
     S.schedules = scheds.sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
-    if (!S.categories.some(c => c.id === S.categoryId)) S.categoryId = (S.categories.find(c => c.id === DEFAULT_CATEGORY) || S.categories[0]).id;
+    if (!S.categories.some(c => c.id === S.categoryId)) {
+      const pick = S.categories.find(c => c.id === lg.defaultCategory)
+        || (lg.defaultCategoryMatch && S.categories.find(c => lg.defaultCategoryMatch.test(c.name)))
+        || S.categories[0];
+      S.categoryId = pick ? pick.id : null;
+    }
     fillSelectors();
     await loadGames();
   } catch (e) {
@@ -297,23 +344,32 @@ async function loadGames() {
   render();
 }
 
-const cacheKey = () => S.categoryId + '|' + S.scheduleId;
+const cacheKey = () => S.league + '|' + S.categoryId + '|' + S.scheduleId;
 function restoreCache() {
   const c = store.get('cache', null);
-  if (!c || c.key !== cacheKey()) return false;
-  Object.assign(S, { games: c.games, standings: c.standings, loadedAt: new Date(c.at), offline: true });
+  if (!c || (c.key !== cacheKey() && !(S.categoryId == null && c.key.startsWith(S.league + '|')))) return false;
+  const [, cat, sch] = c.key.split('|');
+  Object.assign(S, { categoryId: cat, scheduleId: sch, games: c.games, standings: c.standings, loadedAt: new Date(c.at), offline: true });
   if (!S.schedules.length) { S.schedules = c.schedules || []; S.categories = c.categories || []; S.season = c.season; fillSelectors(); }
   fillTeams(); render();
   return true;
 }
 
 /* ---------- selectors ---------- */
+function fillLeagues() {
+  const sel = $('#league');
+  sel.replaceChildren(...LEAGUES.map(l => el('option', { value: l.key }, l.name)));
+  sel.value = S.league;
+  $('#src').textContent = L().name;
+  $('#src').href = `https://page.spordle.com/${L().short}`;
+  $('#sub').textContent = L().name;
+}
 function fillSelectors() {
   const cat = $('#cat'); cat.replaceChildren(...S.categories.map(c => el('option', { value: c.id }, c.name)));
-  cat.value = S.categoryId;
+  if (S.categoryId) cat.value = S.categoryId;
   fillSchedules();
   const c = S.categories.find(c => c.id === S.categoryId);
-  $('#sub').textContent = `PCAHA A · ${c ? c.name : ''} · ${S.season || ''}`;
+  $('#sub').textContent = [L().name, c && c.name, S.season].filter(Boolean).join(' · ');
 }
 function fillSchedules() {
   const scheds = schedulesForCategory();
@@ -470,10 +526,15 @@ function showError(e) {
   $('#list').replaceChildren(el('div', { class: 'error' }, 'Couldn’t load games from Spordle. ', el('br'), el('small', {}, String(e.message || e)),
     el('div', { style: 'margin-top:12px' }, el('button', { class: 'btn', onclick: () => (S.schedules.length ? loadGames() : boot()) }, 'Try again'))));
 }
-function onTeam() { S.teamId = $('#team').value; store.set('teamId', S.teamId); S.shown = PAGE_SIZE; }
+function onTeam() { S.teamId = $('#team').value; pref.set('teamId', S.teamId); S.shown = PAGE_SIZE; }
 
-$('#cat').addEventListener('change', e => { S.categoryId = e.target.value; store.set('categoryId', S.categoryId); S.scheduleId = 'all'; store.set('scheduleId', 'all'); fillSelectors(); S.games = []; loadGames(); });
-$('#sch').addEventListener('change', e => { S.scheduleId = e.target.value; store.set('scheduleId', S.scheduleId); loadGames(); });
+$('#league').addEventListener('change', e => {
+  S.league = e.target.value; store.set('league', S.league); loadPrefs();
+  S.shown = PAGE_SIZE; $('#team').replaceChildren(el('option', { value: '' }, 'All teams'));
+  boot();
+});
+$('#cat').addEventListener('change', e => { S.categoryId = e.target.value; pref.set('categoryId', S.categoryId); S.scheduleId = 'all'; pref.set('scheduleId', 'all'); fillSelectors(); S.games = []; loadGames(); });
+$('#sch').addEventListener('change', e => { S.scheduleId = e.target.value; pref.set('scheduleId', S.scheduleId); loadGames(); });
 $('#team').addEventListener('change', () => { onTeam(); render(); });
 $('#q').addEventListener('input', e => { S.q = e.target.value; S.shown = PAGE_SIZE; render(); });
 $('#refresh').addEventListener('click', () => (S.schedules.length ? loadGames() : boot()));
