@@ -100,6 +100,15 @@ a{color:inherit}
 
 /* standings */
 .sched-h{font-size:14px;font-weight:700;margin:6px 2px 8px}
+.flight{margin-bottom:10px}
+.flight>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);font-weight:700;box-shadow:var(--shadow)}
+.flight>summary::-webkit-details-marker{display:none}
+.flight>summary::before{content:'';width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s;flex:none}
+.flight[open]>summary::before{transform:rotate(45deg)}
+.flight[open]>summary{border-bottom-left-radius:0;border-bottom-right-radius:0;border-bottom-color:transparent;box-shadow:none}
+.flight.mine>summary{border-color:var(--accent)}
+.flight .fcount{margin-left:auto;font-size:12px;font-weight:500;color:var(--muted)}
+.flight>.tablewrap{border-top-left-radius:0;border-top-right-radius:0;margin-bottom:0}
 .tablewrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow-x:auto;margin-bottom:16px;box-shadow:var(--shadow)}
 table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
 th,td{padding:9px 8px;text-align:right;white-space:nowrap}
@@ -330,7 +339,7 @@ async function loadGames() {
   try {
     const [games, ...stand] = await Promise.all([
       api('/games', { where: { scheduleId: { inq: ids } }, include: ['homeTeam', 'awayTeam', 'surface'], order: ['startTime ASC', 'number ASC'] }),
-      ...ids.map(id => api(`/schedules/${id}/teamStats`, { where: { team: { name: { neq: 'TBA' } } }, include: ['team'] }).catch(() => []))
+      ...ids.map(id => api(`/schedules/${id}/teamStats`, { where: { team: { name: { neq: 'TBA' } } }, include: ['team', 'group'] }).catch(() => []))
     ]);
     S.games = games;
     S.standings = Object.fromEntries(ids.map((id, i) => [id, stand[i]]));
@@ -439,7 +448,8 @@ function renderSummary(games, upcoming) {
   // Prefer the league's official standings record (it excludes games that don't count);
   // fall back to tallying final scores ourselves.
   let w = 0, l = 0, t = 0, pts = null;
-  const rows = Object.values(S.standings).flat().filter(r => r && r.teamId === tid);
+  const rows = Object.values(S.standings).flatMap(cleanRows).filter(r => r.teamId === tid);
+  const flight = rows.map(r => r.group && r.group.name).filter(Boolean).pop();
   if (rows.length) { for (const r of rows) { w += r.wins || 0; l += r.losses || 0; t += r.ties || 0; pts = (pts || 0) + (r.points || 0); } }
   else for (const g of games) { const r = status(g) === 'final' ? resultFor(g, tid) : null; if (r === 'W') w++; else if (r === 'L') l++; else if (r === 'T') t++; }
   const next = upcoming.find(g => status(g) === 'upcoming');
@@ -447,7 +457,7 @@ function renderSummary(games, upcoming) {
   const n = live || next;
   const opp = n ? (n.homeTeamId === tid ? n.awayTeam : n.homeTeam) : null;
   box.replaceChildren(el('div', { class: 'summary' },
-    el('div', {}, el('div', { class: 'rec' }, `${w}-${l}-${t}`), el('div', { class: 'lbl' }, pts != null ? `W-L-T · ${pts} pts` : 'W-L-T')),
+    el('div', {}, el('div', { class: 'rec' }, `${w}-${l}-${t}`), el('div', { class: 'lbl' }, [pts != null ? `W-L-T · ${pts} pts` : 'W-L-T', flight].filter(Boolean).join(' · '))),
     n ? el('div', { class: 'next' }, el('span', { class: 'lbl' }, live ? 'Playing now' : 'Next game'),
       el('b', {}, `${n.homeTeamId === tid ? 'vs' : '@'} ${teamName(opp)}`),
       el('span', {}, `${shortDate(new Date(n.startTime))} · ${timeStr(new Date(n.startTime))}`)) : ''));
@@ -497,24 +507,63 @@ function gameCard(g) {
       el('a', { class: 'btn', href: GAME_URL(g.id), target: '_blank', rel: 'noopener', html: ICON_EXT + '<span>Game page</span>' })));
 }
 
+// Standings rows, cleaned: drop placeholder rows, and when a team is listed in a flight
+// (Spordle "group") also drop its duplicate row with no flight.
+function cleanRows(rows) {
+  rows = (rows || []).filter(r => r && r.team);
+  const inGroup = new Set(rows.filter(r => r.groupId != null).map(r => r.teamId));
+  const seen = new Set();
+  return rows.filter(r => {
+    if (r.groupId == null && inGroup.has(r.teamId)) return false;
+    const k = r.teamId + '|' + r.groupId;
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+}
+const rankOf = r => r.manualRanking ?? r.ranking ?? 999;
+
+function standingsTable(rows, tid) {
+  rows = rows.slice().sort((a, b) => rankOf(a) - rankOf(b) || (b.points - a.points));
+  return el('div', { class: 'tablewrap' }, el('table', {},
+    el('thead', {}, el('tr', {}, ...['#', 'Team', 'GP', 'W', 'L', 'T', 'GF', 'GA', 'Diff', 'SP', 'Pts'].map((h, i) => el('th', { class: i === 1 ? 't' : '', title: h === 'SP' ? 'Sportsmanship points' : null }, h)))),
+    el('tbody', {}, ...rows.map((r, i) => el('tr', { class: r.teamId === tid ? 'me' : '', title: 'Show this team’s games',
+      onclick: () => { $('#team').value = String(r.teamId); onTeam(); S.tab = 'results'; store.set('tab', S.tab); render(); window.scrollTo({ top: 0, behavior: 'smooth' }); } },
+      el('td', { class: 'rk' }, String(rankOf(r) === 999 ? i + 1 : rankOf(r))),
+      el('td', { class: 't' }, teamName(r.team)),
+      el('td', {}, n(r.gamesPlayed)), el('td', {}, n(r.wins)), el('td', {}, n(r.losses)), el('td', {}, n(r.ties)),
+      el('td', {}, n(r.goalFor)), el('td', {}, n(r.goalAgainst)), el('td', {}, r.diff > 0 ? '+' + r.diff : n(r.diff)),
+      el('td', {}, n(r.sportsmanship)), el('td', { class: 'pts' }, n(r.points)))))));
+}
+
 function renderStandings() {
   const tid = Number($('#team').value) || null;
-  const scheds = schedulesForCategory().filter(s => S.standings[s.id] && S.standings[s.id].length);
+  const scheds = schedulesForCategory().filter(s => cleanRows(S.standings[s.id]).length);
   if (!scheds.length) return el('div', { class: 'empty' }, 'No standings available yet.');
   const frag = document.createDocumentFragment();
   for (const s of scheds.slice().reverse()) {
-    const rows = S.standings[s.id].slice().sort((a, b) =>
-      (a.manualRanking ?? a.ranking ?? 999) - (b.manualRanking ?? b.ranking ?? 999) || (b.points - a.points));
-    frag.append(el('div', { class: 'sched-h' }, s.name),
-      el('div', { class: 'tablewrap' }, el('table', {},
-        el('thead', {}, el('tr', {}, ...['#', 'Team', 'GP', 'W', 'L', 'T', 'GF', 'GA', 'Diff', 'SP', 'Pts'].map((h, i) => el('th', { class: i === 1 ? 't' : '', title: h === 'SP' ? 'Sportsmanship points' : null }, h)))),
-        el('tbody', {}, ...rows.map((r, i) => el('tr', { class: r.teamId === tid ? 'me' : '', title: 'Show this team’s games',
-          onclick: () => { $('#team').value = String(r.teamId); onTeam(); S.tab = 'results'; store.set('tab', S.tab); render(); window.scrollTo({ top: 0, behavior: 'smooth' }); } },
-          el('td', { class: 'rk' }, String(r.manualRanking ?? r.ranking ?? i + 1)),
-          el('td', { class: 't' }, r.team ? teamName(r.team) : '—'),
-          el('td', {}, n(r.gamesPlayed)), el('td', {}, n(r.wins)), el('td', {}, n(r.losses)), el('td', {}, n(r.ties)),
-          el('td', {}, n(r.goalFor)), el('td', {}, n(r.goalAgainst)), el('td', {}, r.diff > 0 ? '+' + r.diff : n(r.diff)),
-          el('td', {}, n(r.sportsmanship)), el('td', { class: 'pts' }, n(r.points))))))));
+    const rows = cleanRows(S.standings[s.id]);
+    // Split into flights (Spordle groups).
+    const flights = new Map();
+    for (const r of rows) {
+      const key = r.groupId ?? 'none';
+      if (!flights.has(key)) flights.set(key, { name: r.group ? r.group.name : null, rows: [] });
+      flights.get(key).rows.push(r);
+    }
+    frag.append(el('div', { class: 'sched-h' }, s.name));
+    if (flights.size <= 1) { frag.append(standingsTable(rows, tid)); continue; }
+
+    const list = [...flights.values()].sort((a, b) =>
+      (a.name == null) - (b.name == null) || String(a.name).localeCompare(String(b.name), 'en', { numeric: true }));
+    const mineIdx = tid ? list.findIndex(f => f.rows.some(r => r.teamId === tid)) : -1;
+    if (mineIdx > 0) list.unshift(list.splice(mineIdx, 1)[0]); // my team's flight first
+    for (const f of list) {
+      const mine = tid && f.rows.some(r => r.teamId === tid);
+      frag.append(el('details', { class: 'flight' + (mine ? ' mine' : ''), open: !tid || mine ? '' : null },
+        el('summary', {}, el('span', { class: 'fname' }, f.name || 'No flight'),
+          mine ? el('span', { class: 'badge final' }, 'Your team') : '',
+          el('span', { class: 'fcount' }, `${f.rows.length} team${f.rows.length === 1 ? '' : 's'}`)),
+        standingsTable(f.rows, tid)));
+    }
   }
   return frag;
 }
