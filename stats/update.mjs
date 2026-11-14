@@ -251,38 +251,39 @@ function goalieStats(lg, members) {
 function playerStats(lg, members) {
   const info = {};
   lg.games.forEach(r => info[r[0]] = r);
+  const isGoalie = pos => String(pos || '').split('/').some(x => x.trim() === 'G');
   const by = {};
   const get = (name, team, div, stage) => {
     const k = key(name) + '|' + team + '|' + stage;
-    return by[k] || (by[k] = { row: [name, team, div, stage, 0, 0, 0, 0, 0], skater: false, dressed: false });
+    return by[k] || (by[k] = { row: [name, team, div, stage, 0, 0, 0, 0, 0], skated: false });
   };
+  // A game where someone is listed as a goalie (starter or backup) is a goalie game:
+  // it doesn't count toward their player stats. Goalie stats come from starts only.
+  const inNet = new Set();   // "<game>|<name>|<team>"
+  const dressed = new Set(); // "<name>|<team>": dressed as a skater at least once
   for (const id in lg.lineups) {
     const g = info[id];
     if (!g) continue;
     for (const [team, name, pos] of lg.lineups[id]) {
-      if (!isPlayer(pos)) continue;
+      if (!isPlayer(pos)) continue; // team staff
+      if (isGoalie(pos)) { inNet.add(id + '|' + key(name) + '|' + team); continue; }
       const s = get(name, team, g[2], g[4]);
       s.row[4]++;
-      s.dressed = true;
-      if (pos !== 'G') s.skater = true;
+      s.skated = true;
+      dressed.add(key(name) + '|' + team);
     }
   }
+  const credit = (r, name) => name && !inNet.has(r[0] + '|' + key(name) + '|' + r[5]);
   for (const r of lg.goals) {
     if (String(r[11]).includes('Own goal')) continue;
-    if (r[6]) get(r[6], r[5], r[2], r[4]).row[5]++;
-    if (r[7]) get(r[7], r[5], r[2], r[4]).row[6]++;
-    if (r[8]) get(r[8], r[5], r[2], r[4]).row[6]++;
+    if (credit(r, r[6])) get(r[6], r[5], r[2], r[4]).row[5]++;
+    if (credit(r, r[7])) get(r[7], r[5], r[2], r[4]).row[6]++;
+    if (credit(r, r[8])) get(r[8], r[5], r[2], r[4]).row[6]++;
   }
-  for (const r of lg.penalties) if (r[6]) get(r[6], r[5], r[2], r[4]).row[8] += Number(r[9]) || 0;
-  // Goalies show up here only with a point or a penalty. Penalties alone only count for
-  // someone who dressed as a player (a coach's bench penalty doesn't make them a player).
-  const skaters = new Set(Object.values(by).filter(s => s.skater).map(s => key(s.row[0]) + '|' + s.row[1]));
-  const players = new Set(Object.values(by).filter(s => s.dressed).map(s => key(s.row[0]) + '|' + s.row[1]));
+  for (const r of lg.penalties) if (credit(r, r[6])) get(r[6], r[5], r[2], r[4]).row[8] += Number(r[9]) || 0;
+  // A penalty alone only counts for someone who dressed as a skater (not a coach's bench penalty).
   return Object.values(by)
-    .filter(s => {
-      const k = key(s.row[0]) + '|' + s.row[1];
-      return members.has(s.row[1]) && (skaters.has(k) || s.row[5] || s.row[6] || (s.row[8] && players.has(k)));
-    })
+    .filter(s => members.has(s.row[1]) && (s.skated || s.row[5] || s.row[6] || (s.row[8] && dressed.has(key(s.row[0]) + '|' + s.row[1]))))
     .map(s => { s.row[7] = s.row[5] + s.row[6]; return s.row; });
 }
 
