@@ -1,6 +1,9 @@
 // Downloads finished PCAHA A and PCEHL games from Spordle (the data the game
-// sheet PDFs are printed from) and saves scores, starting goalies and goals to
-// stats/data.json. Run hourly by .github/workflows/stats.yml; the Google Sheet
+// sheet PDFs are printed from) and saves scores, starting goalies, goals,
+// penalties and lineups to stats/data.json, plus player and goalie stats for
+// the web app to stats/stats.json. Besides the leagues' own schedules it picks
+// up every other game the league's teams play (tournaments, exhibitions hosted
+// by associations, other leagues), found by team. Run hourly by .github/workflows/stats.yml; the Google Sheet
 // reads the file from GitHub.
 import fs from 'node:fs';
 
@@ -12,7 +15,7 @@ const LEAGUES = [
 ];
 const OUT = process.env.STATS_OUT || 'stats/data.json';
 const PARALLEL = 6;
-const DATA_VERSION = 2; // bump when the saved fields change, to re-download everything once
+const DATA_VERSION = 3; // bump when the saved fields change, to re-download everything once
 
 // Penalty minutes charged to the player, matching Spordle's own PIM totals.
 const PENALTY_MINUTES = { 'Minor': 2, 'Double Minor': 4, 'Major': 5, 'Misconduct': 10, 'Game Misconduct': 10,
@@ -25,6 +28,20 @@ const PENALTY_MINUTES = { 'Minor': 2, 'Double Minor': 4, 'Major': 5, 'Misconduct
 //        Secondary Assist, Period, Time, Type]
 // penalty: [Game ID, Date, Division, Schedule, Stage, Team, Player, Infraction, Penalty, Minutes]
 // lineups: { "<Game ID>": [[Team, Player, Position], ...] } – everyone who dressed
+// teams: names of the league's own teams (stats are only kept for these)
+//
+// Stage, used to filter stats: Regular season, Placement, Exhibition, Playoffs,
+// Tournament (league or outside tournaments), Other (any other outside game).
+function stageOf(schedule, outside) {
+  const type = (schedule && schedule.type) || '';
+  if (type === 'Tournament' || (outside && /tournament|classic|cup|showdown|jamboree/i.test(schedule && schedule.name || ''))) return 'Tournament';
+  if (outside) return 'Other';
+  if (type === 'League') return 'Regular season';
+  if (/playoff/i.test(type)) return 'Playoffs';
+  return type || 'Other';
+}
+const titleCase = s => String(s || '').toLowerCase().replace(/(^|[\s\-'&(])([a-z])/g, (m, p, c) => p + c.toUpperCase())
+  .replace(/\b(Mha|Aa|Viaha|Omaha|U\d+)\b/gi, m => m.toUpperCase());
 
 async function api(path, filter) {
   let url = API + path;
@@ -128,15 +145,52 @@ async function updateLeague(lg, prev) {
   let games = [];
   for (const s of schedules) {
     const list = await api('/games', { where: { scheduleId: { inq: [s.id] } }, include: ['homeTeam', 'awayTeam'], order: ['startTime ASC'] });
-    list.forEach(g => { g._schedule = s.name; g._stage = s.type || ''; g._division = divisions[g.categoryId] || g.division || ''; });
+    list.forEach(g => { g._schedule = s.name; g._stage = stageOf(s, false); g._type = s.type; g._division = divisions[g.categoryId] || g.division || ''; });
     games = games.concat(list);
+  }
+
+  // The league's own teams: everyone in its League/Placement schedules (its tournament
+  // schedules include visiting teams). Early in the season, fall back to non-tournament schedules.
+  const memberIds = new Map();
+  const collect = list => list.forEach(g => [g.homeTeam, g.awayTeam].forEach(t => {
+    if (t && t.id && !/^tba$|non-district/i.test(t.name || '')) memberIds.set(t.id, t);
+  }));
+  collect(games.filter(g => g._type === 'League' || g._type === 'Placement'));
+  if (!memberIds.size) collect(games.filter(g => g._type !== 'Tournament'));
+
+  // Every other game those teams play this season, wherever it was scheduled.
+  const leagueSchedules = new Set(schedules.map(s => s.id));
+  const ids = [...memberIds.keys()];
+  const outside = new Map();
+  for (let i = 0; i < ids.length; i += 40) {
+    const part = ids.slice(i, i + 40);
+    const list = await api('/games', { where: { and: [{ seasonId: season }, { or: [{ homeTeamId: { inq: part } }, { awayTeamId: { inq: part } }] }] }, include: ['homeTeam', 'awayTeam'] });
+    list.forEach(g => { if (!leagueSchedules.has(g.scheduleId)) outside.set(g.id, g); });
+  }
+  if (outside.size) {
+    const hostIds = [...new Set([...outside.values()].map(g => g.officeId))];
+    const hosts = {};
+    (await api('/offices', { where: { id: { inq: hostIds } } })).forEach(o => hosts[o.id] = o);
+    const hostSchedules = {};
+    await inPool(hostIds, PARALLEL, async id => {
+      try { (await api(`/schedules?officeId=${id}&seasonId=${season}`)).forEach(s => hostSchedules[s.id] = s); } catch (e) { /* name unknown */ }
+    });
+    for (const g of outside.values()) {
+      const s = hostSchedules[g.scheduleId];
+      const host = hosts[g.officeId] ? titleCase(hosts[g.officeId].name) : 'Other';
+      const ours = memberIds.has(g.homeTeamId) ? g.homeTeam : g.awayTeam; // the division is our team's
+      g._schedule = s ? `${s.name.trim()} (${host})` : host;
+      g._stage = stageOf(s || { name: host, type: hosts[g.officeId] && hosts[g.officeId].type }, true);
+      g._division = divisions[ours && ours.categoryId] || divisions[g.categoryId] || (ours && ours.division) || g.division || '';
+      games.push(g);
+    }
   }
 
   const now = Date.now();
   const hasScore = g => g.score && Object.keys(g.score).length === 2;
   const played = games.filter(g => g.status === 'Active' && new Date(g.startTime).getTime() < now && hasScore(g));
-  const pending = games
-    .filter(g => g.status === 'Active' && !hasScore(g) && new Date(g.startTime).getTime() < now - 2 * 864e5)
+  const pending = games // league games only; outside hosts don't always enter scores
+    .filter(g => g._type && g.status === 'Active' && !hasScore(g) && new Date(g.startTime).getTime() < now - 2 * 864e5)
     .map(g => [g.id, g.date, g._division, `${teamLabel(g.awayTeam)} @ ${teamLabel(g.homeTeam)}`]);
 
   const have = new Set(prev.games.map(r => r[0]));
@@ -160,57 +214,63 @@ async function updateLeague(lg, prev) {
     penalties: prev.penalties.concat(added.flatMap(x => x.penaltyRows)).sort(order),
     lineups,
     pending,
+    teams: [...memberIds.values()].map(teamLabel).sort(),
   };
-  console.log(`${lg.name} ${season}: ${played.length} played games, ${added.length} new, ${out.games.length} saved, ${pending.length} waiting for a score`);
+  console.log(`${lg.name} ${season}: ${memberIds.size} teams, ${outside.size} games outside the league's schedules, ` +
+    `${played.length} played games, ${added.length} new, ${out.games.length} saved, ${pending.length} waiting for a score`);
   return out;
 }
 
 // ---------- stats for the web app (same rules as the Google Sheet) ----------
+// Rows are per stage so the app can filter by stage and add them up:
+//   players: [Player, Team, Division, Stage, GP, G, A, PTS, PIM]
+//   goalies: [Goalie, Team, Division, Stage, GP, W, L, T, GA, SO]   (GAA = GA / GP, worked out in the app)
+const STATS_VERSION = 2;
 const key = s => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
 
-// [Goalie, Team, Division, GP, W, L, T, GA, GAA, SO]
-function goalieStats(games) {
+function goalieStats(lg, members) {
   const by = {};
-  const add = (name, team, div, gf, ga) => {
-    if (!name) return;
-    const k = key(name) + '|' + team;
-    const s = by[k] || (by[k] = [name, team, div, 0, 0, 0, 0, 0, 0]);
-    s[3]++; s[7] += ga;
-    if (gf > ga) s[4]++; else if (gf < ga) s[5]++; else s[6]++;
-    if (ga === 0) s[8]++;
+  const add = (name, team, div, stage, gf, ga) => {
+    if (!name || !members.has(team)) return;
+    const k = key(name) + '|' + team + '|' + stage;
+    const s = by[k] || (by[k] = [name, team, div, stage, 0, 0, 0, 0, 0, 0]);
+    s[4]++; s[8] += ga;
+    if (gf > ga) s[5]++; else if (gf < ga) s[6]++; else s[7]++;
+    if (ga === 0) s[9]++;
   };
-  for (const r of games) { add(r[7], r[5], r[2], r[6], r[9]); add(r[10], r[8], r[2], r[9], r[6]); }
-  return Object.values(by).map(s => s.slice(0, 8).concat([Math.round(s[7] / s[3] * 100) / 100, s[8]]));
+  for (const r of lg.games) { add(r[7], r[5], r[2], r[4], r[6], r[9]); add(r[10], r[8], r[2], r[4], r[9], r[6]); }
+  return Object.values(by);
 }
 
-// [Player, Team, Division, GP, G, A, PTS, PIM]
-function playerStats(lg) {
+function playerStats(lg, members) {
   const info = {};
   lg.games.forEach(r => info[r[0]] = r);
   const by = {};
-  const get = (name, team, div) => {
-    const k = key(name) + '|' + team;
-    return by[k] || (by[k] = { row: [name, team, div, 0, 0, 0, 0, 0], skater: false });
+  const get = (name, team, div, stage) => {
+    const k = key(name) + '|' + team + '|' + stage;
+    return by[k] || (by[k] = { row: [name, team, div, stage, 0, 0, 0, 0, 0], skater: false });
   };
   for (const id in lg.lineups) {
     const g = info[id];
     if (!g) continue;
     for (const [team, name, pos] of lg.lineups[id]) {
-      const s = get(name, team, g[2]);
-      s.row[3]++;
+      const s = get(name, team, g[2], g[4]);
+      s.row[4]++;
       if (pos !== 'G') s.skater = true;
     }
   }
   for (const r of lg.goals) {
     if (String(r[11]).includes('Own goal')) continue;
-    if (r[6]) get(r[6], r[5], r[2]).row[4]++;
-    if (r[7]) get(r[7], r[5], r[2]).row[5]++;
-    if (r[8]) get(r[8], r[5], r[2]).row[5]++;
+    if (r[6]) get(r[6], r[5], r[2], r[4]).row[5]++;
+    if (r[7]) get(r[7], r[5], r[2], r[4]).row[6]++;
+    if (r[8]) get(r[8], r[5], r[2], r[4]).row[6]++;
   }
-  for (const r of lg.penalties) if (r[6]) get(r[6], r[5], r[2]).row[7] += Number(r[9]) || 0;
+  for (const r of lg.penalties) if (r[6]) get(r[6], r[5], r[2], r[4]).row[8] += Number(r[9]) || 0;
+  // A goalie's row is kept for a stage only if they picked up a point or a penalty there.
+  const skaters = new Set(Object.values(by).filter(s => s.skater).map(s => key(s.row[0]) + '|' + s.row[1]));
   return Object.values(by)
-    .filter(s => s.skater || s.row[4] || s.row[5] || s.row[7])
-    .map(s => { s.row[6] = s.row[4] + s.row[5]; return s.row; });
+    .filter(s => members.has(s.row[1]) && (skaters.has(key(s.row[0]) + '|' + s.row[1]) || s.row[5] || s.row[6] || s.row[8]))
+    .map(s => { s.row[7] = s.row[5] + s.row[6]; return s.row; });
 }
 
 const prev = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : { leagues: {} };
@@ -225,11 +285,14 @@ if (changed) {
 } else {
   console.log('No changes');
 }
-if (changed || !fs.existsSync(STATS_OUT)) {
-  const stats = { updated: data.updated, leagues: {} };
+let oldStats = null;
+try { oldStats = JSON.parse(fs.readFileSync(STATS_OUT, 'utf8')); } catch (e) { /* none yet */ }
+if (changed || !oldStats || oldStats.version !== STATS_VERSION) {
+  const stats = { version: STATS_VERSION, updated: data.updated, leagues: {} };
   for (const name in data.leagues) {
     const lg = data.leagues[name];
-    stats.leagues[name] = { players: playerStats(lg), goalies: goalieStats(lg.games) };
+    const members = new Set(lg.teams || []);
+    stats.leagues[name] = { players: playerStats(lg, members), goalies: goalieStats(lg, members) };
   }
   fs.writeFileSync(STATS_OUT, JSON.stringify(stats));
   console.log('Saved ' + STATS_OUT);
