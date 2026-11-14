@@ -259,6 +259,7 @@ const S = {
   teams: new Map(),          // team id -> team
   view: null,                // { teamId } while a team page is open
   teamTab: 'results',
+  teamData: null,            // { id, games, standings } for the open team page
   statsMode: store.get('statsMode', 'players'),
   sort: {},
   stats: null, statsError: null, statsLoading: false,
@@ -394,6 +395,7 @@ async function loadGames() {
       ...ids.map(id => api(`/schedules/${id}/teamStats`, { where: { team: { name: { neq: 'TBA' } } }, include: ['team', 'group'] }).catch(() => []))
     ]);
     const outside = withOutside ? await loadOutsideGames(games, scheds) : [];
+    S.teamData = null; // team pages re-fetch too
     S.games = (S.scheduleId === 'outside' ? outside : games.concat(outside))
       .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
     S.standings = Object.fromEntries(ids.map((id, i) => [id, stand[i]]));
@@ -707,38 +709,66 @@ function applyHash() {
 }
 window.addEventListener('popstate', applyHash);
 
+/**
+ * A team page always shows all of the team's games this season (league schedules,
+ * tournaments and other games), whatever schedule is picked on the main screen.
+ */
+async function loadTeamData(id) {
+  S.teamData = { id, loading: true };
+  try {
+    const leagueScheds = new Set(S.schedules.map(s => s.id));
+    const catScheds = schedulesForCategory();
+    const [games, ...stand] = await Promise.all([
+      api('/games', { where: { and: [{ seasonId: S.season }, { or: [{ homeTeamId: id }, { awayTeamId: id }] }] },
+        include: ['homeTeam', 'awayTeam', 'surface'] }),
+      ...catScheds.map(s => S.standings[s.id] ? Promise.resolve(S.standings[s.id])
+        : api(`/schedules/${s.id}/teamStats`, { where: { team: { name: { neq: 'TBA' } } }, include: ['team', 'group'] }).catch(() => []))
+    ]);
+    const outside = games.filter(g => !leagueScheds.has(g.scheduleId));
+    if (outside.length) {
+      const hosts = {};
+      try {
+        (await api('/offices', { where: { id: { inq: [...new Set(outside.map(g => g.officeId))] } } })).forEach(o => hosts[o.id] = o.name);
+      } catch (e) { /* labels only */ }
+      outside.forEach(g => { g._host = titleCase(hosts[g.officeId] || 'Other game'); });
+    }
+    games.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+    if (!S.view || S.view.teamId !== id) return; // user moved on
+    S.teamData = { id, games, standings: Object.fromEntries(catScheds.map((s, i) => [s.id, stand[i]])) };
+  } catch (e) {
+    // Offline or Spordle unavailable: fall back to the games already loaded.
+    if (!S.view || S.view.teamId !== id) return;
+    S.teamData = { id, games: S.games.filter(g => g.homeTeamId === id || g.awayTeamId === id), standings: S.standings, partial: true };
+  }
+  render();
+}
+
 function renderTeamPage() {
   const list = $('#list');
   const id = S.view.teamId;
-  const team = S.teams.get(id);
   const back = el('button', { class: 'back', onclick: closeTeam,
     html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg><span>Back</span>' });
-  if (!team) {
-    list.replaceChildren(back, S.games.length
-      ? el('div', { class: 'empty' }, 'This team isn’t in the selected division and schedule.')
-      : el('div', { class: 'skel' }));
-    return;
-  }
-  const games = S.games.filter(g => g.homeTeamId === id || g.awayTeamId === id);
+  if (!S.season) { list.replaceChildren(back, el('div', { class: 'skel' })); return; } // still starting up
+  if (!S.teamData || S.teamData.id !== id) loadTeamData(id);
+  if (S.teamData.loading) { list.replaceChildren(back, el('div', { class: 'skel' }), el('div', { class: 'skel' })); return; }
+  const games = S.teamData.games;
+  const team = S.teams.get(id) || games.map(g => g.homeTeamId === id ? g.homeTeam : g.awayTeam).find(Boolean);
+  if (!team) { list.replaceChildren(back, el('div', { class: 'empty' }, 'No games found for this team this season.')); return; }
   const now = new Date();
   const results = games.filter(g => new Date(g.startTime) <= now).reverse();
   const upcoming = games.filter(g => new Date(g.startTime) > now || status(g) === 'live');
 
-  // Record: the league's standings when available, otherwise tallied from final scores.
-  const rows = Object.values(S.standings).flatMap(cleanRows).filter(r => r.teamId === id);
-  let rec;
-  if (rows.length) {
-    rec = rows.reduce((a, r) => ({ gp: a.gp + (r.gamesPlayed || 0), w: a.w + (r.wins || 0), l: a.l + (r.losses || 0), t: a.t + (r.ties || 0),
-      pts: a.pts + (r.points || 0), gf: a.gf + (r.goalFor || 0), ga: a.ga + (r.goalAgainst || 0) }), { gp: 0, w: 0, l: 0, t: 0, pts: 0, gf: 0, ga: 0 });
-  } else {
-    rec = { gp: 0, w: 0, l: 0, t: 0, pts: null, gf: 0, ga: 0 };
-    for (const g of results) {
-      if (status(g) !== 'final') continue;
-      const r = resultFor(g, id); if (!r) continue;
-      rec.gp++; rec[r.toLowerCase()]++;
-      rec.gf += scoreOf(g, id); rec.ga += scoreOf(g, id === g.homeTeamId ? g.awayTeamId : g.homeTeamId);
-    }
+  // All games: tallied from final scores. League: from the league's standings.
+  const rec = { w: 0, l: 0, t: 0, gf: 0, ga: 0 };
+  for (const g of results) {
+    if (status(g) !== 'final') continue;
+    const r = resultFor(g, id); if (!r) continue;
+    rec[r.toLowerCase()]++;
+    rec.gf += scoreOf(g, id); rec.ga += scoreOf(g, id === g.homeTeamId ? g.awayTeamId : g.homeTeamId);
   }
+  const rows = Object.values(S.teamData.standings || {}).flatMap(cleanRows).filter(r => r.teamId === id);
+  const lrec = rows.length ? rows.reduce((a, r) => ({ w: a.w + (r.wins || 0), l: a.l + (r.losses || 0), t: a.t + (r.ties || 0),
+    pts: a.pts + (r.points || 0) }), { w: 0, l: 0, t: 0, pts: 0 }) : null;
   const flight = rows.map(r => r.group && r.group.name).filter(Boolean).pop();
   const isMine = String(S.teamId) === String(id);
   const division = (S.categories.find(c => c.id === S.categoryId) || {}).name || '';
@@ -750,10 +780,10 @@ function renderTeamPage() {
     el('button', { class: 'btn myteam' + (isMine ? '' : ' primary'), onclick: () => {
       $('#team').value = isMine ? '' : String(id); onTeam(); render(); } }, isMine ? '★ My team (tap to clear)' : '☆ Set as my team')));
   const recBox = el('div', { class: 'recgrid' },
-    el('div', {}, el('b', {}, `${rec.w}-${rec.l}-${rec.t}`), el('span', {}, 'W-L-T')),
-    el('div', {}, el('b', {}, rec.pts != null ? String(rec.pts) : String(rec.gp)), el('span', {}, rec.pts != null ? 'Points' : 'GP')),
-    el('div', {}, el('b', {}, `${rec.gf}-${rec.ga}`), el('span', {}, 'GF-GA')),
-    el('div', {}, el('b', {}, (rec.gf - rec.ga > 0 ? '+' : '') + (rec.gf - rec.ga)), el('span', {}, 'Diff')));
+    el('div', {}, el('b', {}, `${rec.w}-${rec.l}-${rec.t}`), el('span', {}, 'All games')),
+    el('div', {}, el('b', {}, lrec ? `${lrec.w}-${lrec.l}-${lrec.t}` : '–'), el('span', {}, 'League')),
+    el('div', {}, el('b', {}, lrec ? String(lrec.pts) : '–'), el('span', {}, 'League pts')),
+    el('div', {}, el('b', {}, `${rec.gf}-${rec.ga}`), el('span', {}, 'GF-GA')));
 
   const tabs = [['results', 'Results', results.length], ['upcoming', 'Upcoming', upcoming.length], ['players', 'Players'], ['goalies', 'Goalies']];
   const seg = el('div', { class: 'seg' }, ...tabs.map(([k, label, count]) => el('button', { 'aria-pressed': String(S.teamTab === k),
