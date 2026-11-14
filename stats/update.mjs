@@ -165,13 +165,72 @@ async function updateLeague(lg, prev) {
   return out;
 }
 
+// ---------- stats for the web app (same rules as the Google Sheet) ----------
+const key = s => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
+
+// [Goalie, Team, Division, GP, W, L, T, GA, GAA, SO]
+function goalieStats(games) {
+  const by = {};
+  const add = (name, team, div, gf, ga) => {
+    if (!name) return;
+    const k = key(name) + '|' + team;
+    const s = by[k] || (by[k] = [name, team, div, 0, 0, 0, 0, 0, 0]);
+    s[3]++; s[7] += ga;
+    if (gf > ga) s[4]++; else if (gf < ga) s[5]++; else s[6]++;
+    if (ga === 0) s[8]++;
+  };
+  for (const r of games) { add(r[7], r[5], r[2], r[6], r[9]); add(r[10], r[8], r[2], r[9], r[6]); }
+  return Object.values(by).map(s => s.slice(0, 8).concat([Math.round(s[7] / s[3] * 100) / 100, s[8]]));
+}
+
+// [Player, Team, Division, GP, G, A, PTS, PIM]
+function playerStats(lg) {
+  const info = {};
+  lg.games.forEach(r => info[r[0]] = r);
+  const by = {};
+  const get = (name, team, div) => {
+    const k = key(name) + '|' + team;
+    return by[k] || (by[k] = { row: [name, team, div, 0, 0, 0, 0, 0], skater: false });
+  };
+  for (const id in lg.lineups) {
+    const g = info[id];
+    if (!g) continue;
+    for (const [team, name, pos] of lg.lineups[id]) {
+      const s = get(name, team, g[2]);
+      s.row[3]++;
+      if (pos !== 'G') s.skater = true;
+    }
+  }
+  for (const r of lg.goals) {
+    if (String(r[11]).includes('Own goal')) continue;
+    if (r[6]) get(r[6], r[5], r[2]).row[4]++;
+    if (r[7]) get(r[7], r[5], r[2]).row[5]++;
+    if (r[8]) get(r[8], r[5], r[2]).row[5]++;
+  }
+  for (const r of lg.penalties) if (r[6]) get(r[6], r[5], r[2]).row[7] += Number(r[9]) || 0;
+  return Object.values(by)
+    .filter(s => s.skater || s.row[4] || s.row[5] || s.row[7])
+    .map(s => { s.row[6] = s.row[4] + s.row[5]; return s.row; });
+}
+
 const prev = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : { leagues: {} };
 const data = { updated: new Date().toISOString(), leagues: {} };
 for (const lg of LEAGUES) data.leagues[lg.name] = await updateLeague(lg, prev.leagues && prev.leagues[lg.name]);
-// Only rewrite the file when something changed, so the workflow doesn't commit every hour.
-if (JSON.stringify(data.leagues) !== JSON.stringify(prev.leagues)) {
+// Only rewrite the files when something changed, so the workflow doesn't commit every hour.
+const STATS_OUT = OUT.replace(/data\.json$/, 'stats.json');
+const changed = JSON.stringify(data.leagues) !== JSON.stringify(prev.leagues);
+if (changed) {
   fs.writeFileSync(OUT, JSON.stringify(data));
   console.log('Saved ' + OUT);
 } else {
   console.log('No changes');
+}
+if (changed || !fs.existsSync(STATS_OUT)) {
+  const stats = { updated: data.updated, leagues: {} };
+  for (const name in data.leagues) {
+    const lg = data.leagues[name];
+    stats.leagues[name] = { players: playerStats(lg), goalies: goalieStats(lg.games) };
+  }
+  fs.writeFileSync(STATS_OUT, JSON.stringify(stats));
+  console.log('Saved ' + STATS_OUT);
 }
