@@ -78,6 +78,7 @@ a{color:inherit}
 .badge.live{background:var(--live);color:#fff}
 .badge.cancel{background:transparent;border:1px solid var(--loss);color:var(--loss)}
 .badge.res-W{background:var(--win);color:#fff}.badge.res-L{background:var(--loss);color:#fff}.badge.res-T{background:var(--tie);color:#fff}
+.meta .host{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--accent);background:var(--accent-soft);padding:2px 7px;border-radius:999px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta .right{margin-left:auto;display:flex;gap:6px;align-items:center}
 .trow{display:flex;align-items:center;gap:10px;padding:4px 0}
 .trow img,.trow .ph{width:28px;height:28px;border-radius:6px;object-fit:contain;background:#fff;flex:none;border:1px solid var(--line)}
@@ -142,6 +143,9 @@ td.sorted{font-weight:700}
 .seg button{flex:1;border:0;background:transparent;padding:8px 6px;border-radius:9px;cursor:pointer;font-weight:600;color:var(--muted)}
 .seg .count{font-weight:500;opacity:.7;font-size:12px;margin-left:4px}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.chip{border:1px solid var(--line);background:var(--surface);color:var(--muted);border-radius:999px;padding:6px 11px;font-size:13px;font-weight:600;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .statnote{font-size:12px;color:var(--muted);margin:-4px 2px 12px}
 .back{display:inline-flex;align-items:center;gap:6px;border:0;background:none;color:var(--accent);font-weight:600;cursor:pointer;padding:4px 0;margin:2px 0 10px}
 .back svg{width:16px;height:16px}
@@ -258,6 +262,7 @@ const S = {
   statsMode: store.get('statsMode', 'players'),
   sort: {},
   stats: null, statsError: null, statsLoading: false,
+  stages: store.get('stages', null), // stats stages to include; null = all
 };
 
 const L = () => LEAGUES.find(l => l.key === S.league);
@@ -380,14 +385,17 @@ function schedulesForCategory() { return S.schedules.filter(s => s.categoryId ==
 async function loadGames() {
   setBusy(true);
   const scheds = schedulesForCategory();
-  const ids = S.scheduleId === 'all' ? scheds.map(s => s.id) : [Number(S.scheduleId)];
+  const withOutside = S.scheduleId === 'all' || S.scheduleId === 'outside';
+  const ids = withOutside ? scheds.map(s => s.id) : [Number(S.scheduleId)];
   if (!ids.length) { S.games = []; S.standings = {}; setBusy(false); render(); return; }
   try {
     const [games, ...stand] = await Promise.all([
       api('/games', { where: { scheduleId: { inq: ids } }, include: ['homeTeam', 'awayTeam', 'surface'], order: ['startTime ASC', 'number ASC'] }),
       ...ids.map(id => api(`/schedules/${id}/teamStats`, { where: { team: { name: { neq: 'TBA' } } }, include: ['team', 'group'] }).catch(() => []))
     ]);
-    S.games = games;
+    const outside = withOutside ? await loadOutsideGames(games, scheds) : [];
+    S.games = (S.scheduleId === 'outside' ? outside : games.concat(outside))
+      .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
     S.standings = Object.fromEntries(ids.map((id, i) => [id, stand[i]]));
     S.loadedAt = new Date(); S.offline = false;
     store.set('cache', { key: cacheKey(), games: S.games, standings: S.standings, at: S.loadedAt.toISOString(), schedules: S.schedules, categories: S.categories, season: S.season });
@@ -398,6 +406,41 @@ async function loadGames() {
   fillTeams();
   render();
 }
+
+/**
+ * Tournaments, association exhibitions and other leagues' games: every game this
+ * division's teams play outside the league's own schedules, found by team.
+ */
+async function loadOutsideGames(games, scheds) {
+  try {
+    const type = {}; scheds.forEach(s => type[s.id] = s.type);
+    const members = new Map();
+    const collect = list => list.forEach(g => [g.homeTeam, g.awayTeam].forEach(t => {
+      if (t && t.id && !/^tba$|non-district/i.test(t.name || '')) members.set(t.id, t);
+    }));
+    collect(games.filter(g => type[g.scheduleId] === 'League' || type[g.scheduleId] === 'Placement'));
+    if (!members.size) collect(games.filter(g => type[g.scheduleId] !== 'Tournament'));
+    const ids = [...members.keys()];
+    if (!ids.length) return [];
+    const leagueScheds = new Set(S.schedules.map(s => s.id));
+    const parts = [];
+    for (let i = 0; i < ids.length; i += 40) parts.push(ids.slice(i, i + 40));
+    const found = new Map();
+    (await Promise.all(parts.map(part => api('/games', { where: { and: [{ seasonId: S.season },
+      { or: [{ homeTeamId: { inq: part } }, { awayTeamId: { inq: part } }] }] }, include: ['homeTeam', 'awayTeam', 'surface'] }))))
+      .flat().forEach(g => { if (!leagueScheds.has(g.scheduleId)) found.set(g.id, g); });
+    const list = [...found.values()];
+    if (!list.length) return [];
+    const hosts = {};
+    (await api('/offices', { where: { id: { inq: [...new Set(list.map(g => g.officeId))] } } })).forEach(o => hosts[o.id] = o.name);
+    list.forEach(g => { g._host = titleCase(hosts[g.officeId] || 'Other game'); });
+    return list;
+  } catch (e) {
+    return []; // league games still show
+  }
+}
+const titleCase = s => String(s || '').toLowerCase().replace(/(^|[\s\-'&(])([a-z])/g, (m, p, c) => p + c.toUpperCase())
+  .replace(/\b(Mha|Aa|Viaha|Omaha|U\d+)\b/gi, m => m.toUpperCase());
 
 const cacheKey = () => S.league + '|' + S.categoryId + '|' + S.scheduleId;
 function restoreCache() {
@@ -429,9 +472,10 @@ function fillSelectors() {
 function fillSchedules() {
   const scheds = schedulesForCategory();
   const sel = $('#sch');
-  sel.replaceChildren(el('option', { value: 'all' }, scheds.length > 1 ? `All schedules (${scheds.length})` : 'All schedules'),
-    ...scheds.map(s => el('option', { value: String(s.id) }, s.name)));
-  if (S.scheduleId !== 'all' && !scheds.some(s => String(s.id) === String(S.scheduleId))) S.scheduleId = 'all';
+  sel.replaceChildren(el('option', { value: 'all' }, 'All games'),
+    ...scheds.map(s => el('option', { value: String(s.id) }, s.name)),
+    el('option', { value: 'outside' }, 'Tournaments & other games'));
+  if (S.scheduleId !== 'all' && S.scheduleId !== 'outside' && !scheds.some(s => String(s.id) === String(S.scheduleId))) S.scheduleId = 'all';
   sel.value = String(S.scheduleId);
 }
 function fillTeams() {
@@ -547,6 +591,7 @@ function gameCard(g, focusTeam) {
     el('div', { class: 'meta' },
       el('time', { datetime: g.startTime }, timeStr(d)),
       el('span', {}, '#' + g.number),
+      g._host ? el('span', { class: 'host', title: 'Played outside the league schedule' }, g._host) : '',
       el('span', { class: 'right' }, res ? el('span', { class: 'badge res-' + res }, res) : '', badge)),
     teamRow(g, g.awayTeam, 'away', st, tid),
     teamRow(g, g.homeTeam, 'home', st, tid),
@@ -745,6 +790,45 @@ const STAT_COLS = {
     { label: 'GA', i: 7, title: 'Goals against' }, { label: 'GAA', i: 8, title: 'Goals-against average', asc: true, fixed: 2 },
     { label: 'SO', i: 9, title: 'Shutouts' }],
 };
+const STAGE_ORDER = ['Regular season', 'Placement', 'Playoffs', 'Exhibition', 'Tournament', 'Other'];
+// stats.json v2 rows carry a stage: players [name, team, div, stage, GP, G, A, PTS, PIM],
+// goalies [name, team, div, stage, GP, W, L, T, GA, SO]. Rows for the selected stages are added up.
+function statRows(lg, mode) {
+  const v2 = S.stats.version >= 2;
+  const rows = lg[mode].map(r => v2 ? r : mode === 'players' ? [r[0], r[1], r[2], ''].concat(r.slice(3))
+    : [r[0], r[1], r[2], ''].concat(r.slice(3, 8), [r[9]]));
+  return rows;
+}
+function stagesIn(lg) {
+  const seen = new Set();
+  ['players', 'goalies'].forEach(m => statRows(lg, m).forEach(r => r[3] && seen.add(r[3])));
+  return [...seen].sort((a, b) => (STAGE_ORDER.indexOf(a) + 99) % 99 - (STAGE_ORDER.indexOf(b) + 99) % 99 || a.localeCompare(b));
+}
+function sumStages(rows, mode) {
+  const by = new Map();
+  for (const r of rows) {
+    const k = r[0] + '|' + r[1];
+    const s = by.get(k);
+    if (!s) { by.set(k, r.slice(0, 3).concat(r.slice(4))); continue; }
+    for (let i = 4; i < r.length; i++) s[i - 1] += r[i];
+  }
+  return [...by.values()].map(s => mode === 'players' ? s // [name, team, div, GP, G, A, PTS, PIM]
+    : s.slice(0, 8).concat([s[3] ? Math.round(s[7] / s[3] * 100) / 100 : 0, s[8]])); // [..., GA, GAA, SO]
+}
+function stageChips(lg) {
+  const all = stagesIn(lg);
+  if (all.length < 2) return '';
+  const sel = S.stages ? all.filter(x => S.stages.includes(x)) : all;
+  const set = list => { S.stages = list.length === all.length ? null : list; store.set('stages', S.stages); render(); };
+  return el('div', { class: 'chips', role: 'group', 'aria-label': 'Game types' },
+    el('button', { class: 'chip', 'aria-pressed': String(sel.length === all.length), onclick: () => set(all) }, 'All games'),
+    ...all.map(x => el('button', { class: 'chip', 'aria-pressed': String(S.stages != null && sel.includes(x)), onclick: () => {
+      const cur = S.stages ? sel : [];
+      const next = cur.includes(x) ? cur.filter(y => y !== x) : cur.concat([x]);
+      set(next.length ? next : all);
+    } }, x)));
+}
+
 const DEFAULT_SORT = { players: { i: 6, dir: -1 }, goalies: { i: 4, dir: -1 } };
 const TIEBREAK = { players: [6, 4, 3], goalies: [4, 8, 3] };
 
@@ -780,7 +864,10 @@ function statsBlock(mode, { division, team, search }) {
     return el('div', { class: 'empty' }, S.statsError);
   }
   const lg = S.stats.leagues[LEAGUE_STATS_NAME[S.league]];
-  let rows = lg ? lg[mode].filter(r => r[2] === division && (!team || r[1] === team)) : [];
+  const stages = lg ? stagesIn(lg) : [];
+  const picked = S.stages ? stages.filter(x => S.stages.includes(x)) : stages;
+  let rows = lg ? sumStages(statRows(lg, mode).filter(r => r[2] === division && (!team || r[1] === team)
+    && (!r[3] || !S.stages || picked.includes(r[3]))), mode) : [];
   const q = (search || '').trim().toLowerCase();
   if (q) rows = rows.filter(r => String(r[0]).toLowerCase().includes(q) || String(r[1]).toLowerCase().includes(q));
   const cols = STAT_COLS[mode].filter(c => !c.team); // team is shown under the name to keep the table narrow
@@ -799,9 +886,10 @@ function statsBlock(mode, { division, team, search }) {
   };
   const what = mode === 'players' ? 'players' : 'goalies';
   const note = el('div', { class: 'statnote' }, rows.length
-    ? `${rows.length} ${what}${team ? '' : ' · ' + division} · tap a heading to sort · all game types this season · updated ${shortDate(new Date(S.stats.updated))}, ${timeStr(new Date(S.stats.updated))}`
-    : `No ${what} stats${team ? ' for this team' : ' for ' + division} yet.`);
-  if (!rows.length) return note;
+    ? `${rows.length} ${what}${team ? '' : ' · ' + division} · ${picked.length === stages.length ? 'all games' : picked.join(', ')} · tap a heading to sort · updated ${shortDate(new Date(S.stats.updated))}, ${timeStr(new Date(S.stats.updated))}`
+    : `No ${what} stats${team ? ' for this team' : ' for ' + division} ${picked.length === stages.length ? 'yet' : 'in these games'}.`);
+  const chips = lg ? stageChips(lg) : '';
+  if (!rows.length) { const f = document.createDocumentFragment(); f.append(chips, note); return f; }
 
   const table = el('table', { class: 'stats' },
     el('thead', {}, el('tr', {}, el('th', {}, '#'), ...cols.map(c => el('th', {
@@ -820,7 +908,7 @@ function statsBlock(mode, { division, team, search }) {
         return el('td', { class: cls || null }, c.fixed ? Number(v).toFixed(c.fixed) : String(v));
       })))));
   const frag = document.createDocumentFragment();
-  frag.append(note, el('div', { class: 'tablewrap' }, table));
+  frag.append(chips, note, el('div', { class: 'tablewrap' }, table));
   return frag;
 }
 
