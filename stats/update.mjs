@@ -12,12 +12,19 @@ const LEAGUES = [
 ];
 const OUT = process.env.STATS_OUT || 'stats/data.json';
 const PARALLEL = 6;
+const DATA_VERSION = 2; // bump when the saved fields change, to re-download everything once
+
+// Penalty minutes charged to the player, matching Spordle's own PIM totals.
+const PENALTY_MINUTES = { 'Minor': 2, 'Double Minor': 4, 'Major': 5, 'Misconduct': 10, 'Game Misconduct': 10,
+  'Gross Misconduct': 10, 'Match': 5, 'Penalty Shot': 0 };
 
 // Row layouts (the Google Sheet uses the same columns):
 // game: [Game ID, Date, Division, Schedule, Stage, Home Team, Home Score, Home Starting Goalie,
 //        Away Team, Away Score, Away Starting Goalie, Notes]
 // goal: [Game ID, Date, Division, Schedule, Stage, Team, Goal Scorer, Primary Assist,
 //        Secondary Assist, Period, Time, Type]
+// penalty: [Game ID, Date, Division, Schedule, Stage, Team, Player, Infraction, Penalty, Minutes]
+// lineups: { "<Game ID>": [[Team, Player, Position], ...] } – everyone who dressed
 
 async function api(path, filter) {
   let url = API + path;
@@ -47,7 +54,7 @@ const teamLabel = t => t ? (t.shortName || t.name) : 'TBA';
 const elapsed = t => t ? (parseInt(t.period, 10) || 9) * 10000 + (t.elapsedMinutes || 0) * 60 + (t.elapsedSeconds || 0) : 0;
 const clock = t => `${t.minutes}:${String(t.seconds || 0).padStart(2, '0')}`;
 function person(name) {
-  if (!name) return '';
+  if (!name || /^\s*unknown\s*$/i.test(name)) return ''; // out-of-district teams sometimes list players as "Unknown"
   return String(name).trim().replace(/\s+/g, ' ').toLowerCase()
     .replace(/(^|[\s\-'’])([a-z])/g, (m, p, c) => p + c.toUpperCase())
     .replace(/\bMc([a-z])/g, (m, c) => 'Mc' + c.toUpperCase());
@@ -82,17 +89,38 @@ function buildGame(g, box, lineups) {
     notes.push(`Goal list (${counted[g.awayTeamId] || 0}-${counted[g.homeTeamId] || 0}) doesn't match final score (${awayScore}-${homeScore})`);
   if ((box.shootout || []).length) notes.push('Decided by shootout');
 
+  const penaltyRows = (box.penalties || []).slice().sort((a, b) => elapsed(a.gameTime) - elapsed(b.gameTime)).map(x => {
+    const kind = (x.duration && x.duration.name) || '';
+    let minutes = x.isBenchPenalty ? 0 : PENALTY_MINUTES[kind];
+    if (minutes === undefined) { minutes = 0; notes.push(`Unknown penalty type "${kind}" counted as 0 minutes`); }
+    return [g.id, g.date, g._division, g._schedule, g._stage, teamName(x.teamId),
+      person(x.participant && x.participant.fullName), x.infraction || '',
+      kind + (x.isBenchPenalty ? ' (bench, served)' : ''), minutes];
+  });
+
+  const lineupRows = [];
+  for (const teamId of [g.homeTeamId, g.awayTeamId]) {
+    for (const p of lineups[teamId] || []) {
+      if (p.isReleased || p.suspension) continue; // not playing this game
+      const name = person(p.participant && p.participant.fullName);
+      if (name) lineupRows.push([teamName(teamId), name, (p.positions || []).join('/')]);
+    }
+  }
+
   return {
     gameRow: [g.id, g.date, g._division, g._schedule, g._stage, teamLabel(g.homeTeam), homeScore, homeGoalie,
       teamLabel(g.awayTeam), awayScore, awayGoalie, notes.join('; ')],
     goalRows,
+    penaltyRows,
+    lineupRows,
   };
 }
 
 async function updateLeague(lg, prev) {
   const seasons = await api(`/seasons?officeId=${lg.officeId}`);
   const season = (seasons.find(s => s.isCurrent) || seasons[0]).seasonId;
-  if (!prev || prev.season !== season) prev = { games: [], goals: [] }; // new season: start fresh
+  if (!prev || prev.season !== season || prev.version !== DATA_VERSION)
+    prev = { games: [], goals: [], penalties: [], lineups: {} }; // new season or new fields: start fresh
 
   const divisions = {};
   (await api(`/categories?officeId=${lg.officeId}&seasonId=${season}`)).forEach(c => divisions[c.id] = c.name);
@@ -108,37 +136,4 @@ async function updateLeague(lg, prev) {
   const hasScore = g => g.score && Object.keys(g.score).length === 2;
   const played = games.filter(g => g.status === 'Active' && new Date(g.startTime).getTime() < now && hasScore(g));
   const pending = games
-    .filter(g => g.status === 'Active' && !hasScore(g) && new Date(g.startTime).getTime() < now - 2 * 864e5)
-    .map(g => [g.id, g.date, g._division, `${teamLabel(g.awayTeam)} @ ${teamLabel(g.homeTeam)}`]);
-
-  const have = new Set(prev.games.map(r => r[0]));
-  const todo = played.filter(g => !have.has(g.id));
-  const built = await inPool(todo, PARALLEL, async g => {
-    try {
-      const [box, lineups] = await Promise.all([api(`/games/${g.id}/boxScore`), api(`/games/${g.id}/lineups`)]);
-      return buildGame(g, box, lineups);
-    } catch (e) { console.warn(`  skipped game ${g.id}: ${e.message}`); return null; } // retried next run
-  });
-
-  const order = (a, b) => String(a[1]).localeCompare(String(b[1])) || a[0] - b[0];
-  const added = built.filter(Boolean);
-  const out = {
-    season,
-    games: prev.games.concat(added.map(x => x.gameRow)).sort(order),
-    goals: prev.goals.concat(added.flatMap(x => x.goalRows)).sort(order), // stable sort keeps goals in game order
-    pending,
-  };
-  console.log(`${lg.name} ${season}: ${played.length} played games, ${added.length} new, ${out.games.length} saved, ${pending.length} waiting for a score`);
-  return out;
-}
-
-const prev = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : { leagues: {} };
-const data = { updated: new Date().toISOString(), leagues: {} };
-for (const lg of LEAGUES) data.leagues[lg.name] = await updateLeague(lg, prev.leagues && prev.leagues[lg.name]);
-// Only rewrite the file when something changed, so the workflow doesn't commit every hour.
-if (JSON.stringify(data.leagues) !== JSON.stringify(prev.leagues)) {
-  fs.writeFileSync(OUT, JSON.stringify(data));
-  console.log('Saved ' + OUT);
-} else {
-  console.log('No changes');
-}
+    .filter(g => g.status === 'Active'
