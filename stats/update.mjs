@@ -40,6 +40,10 @@ function stageOf(schedule, outside) {
   if (/playoff/i.test(type)) return 'Playoffs';
   return type || 'Other';
 }
+// Lineups also list team staff (Head Coach, Assistant Coach, Manager, Safety Person...);
+// only these positions are players.
+const PLAYER_POSITIONS = ['F', 'D', 'G', 'C', 'LW', 'RW', 'W'];
+const isPlayer = pos => String(pos || '').split('/').some(x => PLAYER_POSITIONS.includes(x.trim()));
 const titleCase = s => String(s || '').toLowerCase().replace(/(^|[\s\-'&(])([a-z])/g, (m, p, c) => p + c.toUpperCase())
   .replace(/\b(Mha|Aa|Viaha|Omaha|U\d+)\b/gi, m => m.toUpperCase());
 
@@ -119,6 +123,7 @@ function buildGame(g, box, lineups) {
   for (const teamId of [g.homeTeamId, g.awayTeamId]) {
     for (const p of lineups[teamId] || []) {
       if (p.isReleased || p.suspension) continue; // not playing this game
+      if (!isPlayer((p.positions || []).join('/'))) continue; // team staff
       const name = person(p.participant && p.participant.fullName);
       if (name) lineupRows.push([teamName(teamId), name, (p.positions || []).join('/')]);
     }
@@ -204,7 +209,8 @@ async function updateLeague(lg, prev) {
 
   const order = (a, b) => String(a[1]).localeCompare(String(b[1])) || a[0] - b[0];
   const added = built.filter(Boolean);
-  const lineups = Object.assign({}, prev.lineups);
+  const lineups = {};
+  for (const id in prev.lineups) lineups[id] = prev.lineups[id].filter(r => isPlayer(r[2])); // drops staff saved by older versions
   added.forEach(x => { lineups[x.gameRow[0]] = x.lineupRows; });
   const out = {
     version: DATA_VERSION,
@@ -248,14 +254,16 @@ function playerStats(lg, members) {
   const by = {};
   const get = (name, team, div, stage) => {
     const k = key(name) + '|' + team + '|' + stage;
-    return by[k] || (by[k] = { row: [name, team, div, stage, 0, 0, 0, 0, 0], skater: false });
+    return by[k] || (by[k] = { row: [name, team, div, stage, 0, 0, 0, 0, 0], skater: false, dressed: false });
   };
   for (const id in lg.lineups) {
     const g = info[id];
     if (!g) continue;
     for (const [team, name, pos] of lg.lineups[id]) {
+      if (!isPlayer(pos)) continue;
       const s = get(name, team, g[2], g[4]);
       s.row[4]++;
+      s.dressed = true;
       if (pos !== 'G') s.skater = true;
     }
   }
@@ -266,10 +274,15 @@ function playerStats(lg, members) {
     if (r[8]) get(r[8], r[5], r[2], r[4]).row[6]++;
   }
   for (const r of lg.penalties) if (r[6]) get(r[6], r[5], r[2], r[4]).row[8] += Number(r[9]) || 0;
-  // A goalie's row is kept for a stage only if they picked up a point or a penalty there.
+  // Goalies show up here only with a point or a penalty. Penalties alone only count for
+  // someone who dressed as a player (a coach's bench penalty doesn't make them a player).
   const skaters = new Set(Object.values(by).filter(s => s.skater).map(s => key(s.row[0]) + '|' + s.row[1]));
+  const players = new Set(Object.values(by).filter(s => s.dressed).map(s => key(s.row[0]) + '|' + s.row[1]));
   return Object.values(by)
-    .filter(s => members.has(s.row[1]) && (skaters.has(key(s.row[0]) + '|' + s.row[1]) || s.row[5] || s.row[6] || s.row[8]))
+    .filter(s => {
+      const k = key(s.row[0]) + '|' + s.row[1];
+      return members.has(s.row[1]) && (skaters.has(k) || s.row[5] || s.row[6] || (s.row[8] && players.has(k)));
+    })
     .map(s => { s.row[7] = s.row[5] + s.row[6]; return s.row; });
 }
 
