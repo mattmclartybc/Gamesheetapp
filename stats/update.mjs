@@ -136,4 +136,42 @@ async function updateLeague(lg, prev) {
   const hasScore = g => g.score && Object.keys(g.score).length === 2;
   const played = games.filter(g => g.status === 'Active' && new Date(g.startTime).getTime() < now && hasScore(g));
   const pending = games
-    .filter(g => g.status === 'Active'
+    .filter(g => g.status === 'Active' && !hasScore(g) && new Date(g.startTime).getTime() < now - 2 * 864e5)
+    .map(g => [g.id, g.date, g._division, `${teamLabel(g.awayTeam)} @ ${teamLabel(g.homeTeam)}`]);
+
+  const have = new Set(prev.games.map(r => r[0]));
+  const todo = played.filter(g => !have.has(g.id));
+  const built = await inPool(todo, PARALLEL, async g => {
+    try {
+      const [box, lineups] = await Promise.all([api(`/games/${g.id}/boxScore`), api(`/games/${g.id}/lineups`)]);
+      return buildGame(g, box, lineups);
+    } catch (e) { console.warn(`  skipped game ${g.id}: ${e.message}`); return null; } // retried next run
+  });
+
+  const order = (a, b) => String(a[1]).localeCompare(String(b[1])) || a[0] - b[0];
+  const added = built.filter(Boolean);
+  const lineups = Object.assign({}, prev.lineups);
+  added.forEach(x => { lineups[x.gameRow[0]] = x.lineupRows; });
+  const out = {
+    version: DATA_VERSION,
+    season,
+    games: prev.games.concat(added.map(x => x.gameRow)).sort(order),
+    goals: prev.goals.concat(added.flatMap(x => x.goalRows)).sort(order), // stable sort keeps goals in game order
+    penalties: prev.penalties.concat(added.flatMap(x => x.penaltyRows)).sort(order),
+    lineups,
+    pending,
+  };
+  console.log(`${lg.name} ${season}: ${played.length} played games, ${added.length} new, ${out.games.length} saved, ${pending.length} waiting for a score`);
+  return out;
+}
+
+const prev = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : { leagues: {} };
+const data = { updated: new Date().toISOString(), leagues: {} };
+for (const lg of LEAGUES) data.leagues[lg.name] = await updateLeague(lg, prev.leagues && prev.leagues[lg.name]);
+// Only rewrite the file when something changed, so the workflow doesn't commit every hour.
+if (JSON.stringify(data.leagues) !== JSON.stringify(prev.leagues)) {
+  fs.writeFileSync(OUT, JSON.stringify(data));
+  console.log('Saved ' + OUT);
+} else {
+  console.log('No changes');
+}
