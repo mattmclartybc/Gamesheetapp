@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a1580">
-<title>Hockey Game Sheets</title>
+<title>Rinksheets</title>
 <style>
 :root{
   --bg:#f3f4f8; --surface:#ffffff; --surface-2:#eef0f7; --text:#12162b; --muted:#5b6178;
@@ -35,6 +35,9 @@ a{color:inherit}
 .top{background:#0a1580;color:#fff;padding:18px 0 14px;padding-top:max(18px,env(safe-area-inset-top))}
 .top .wrap{display:flex;align-items:center;gap:12px}
 .top h1{margin:0;font-size:20px;letter-spacing:.2px}
+.top h1 .tag{font-size:14px;font-weight:500;opacity:.85;letter-spacing:0}
+.top h1 .tag::before{content:'– '}
+@media (max-width:520px){.top h1 .tag{display:block;font-size:13px;margin-top:1px}.top h1 .tag::before{content:none}}
 .top .sub{font-size:13px;opacity:.8;margin-top:2px}
 .top .grow{flex:1;min-width:0}
 .iconbtn{background:rgba(255,255,255,.12);border:0;border-radius:10px;width:40px;height:40px;display:grid;place-items:center;cursor:pointer;color:#fff}
@@ -179,7 +182,7 @@ footer a{color:var(--muted)}
   <div class="wrap">
     <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><ellipse cx="17" cy="20" rx="13" ry="6" fill="#fff" opacity=".95"/><ellipse cx="17" cy="16" rx="13" ry="6" fill="#fff"/><ellipse cx="17" cy="16" rx="13" ry="6" fill="none" stroke="#0a1580" stroke-width="1.5"/></svg>
     <div class="grow">
-      <h1>Game Sheets</h1>
+      <h1>Rinksheets <span class="tag">Scores, Gamesheets, Stats &amp; more</span></h1>
       <div class="sub" id="sub">PCAHA A</div>
     </div>
     <button class="iconbtn" id="refresh" title="Refresh" aria-label="Refresh">
@@ -259,7 +262,8 @@ const S = {
   teams: new Map(),          // team id -> team
   view: null,                // { teamId } while a team page is open
   teamTab: 'results',
-  teamData: null,            // { id, games, standings } for the open team page
+  teamData: null,
+  leagueGames: [],            // { id, games, standings } for the open team page
   statsMode: store.get('statsMode', 'players'),
   sort: {},
   stats: null, statsError: null, statsLoading: false,
@@ -396,6 +400,7 @@ async function loadGames() {
     ]);
     const outside = withOutside ? await loadOutsideGames(games, scheds) : [];
     S.teamData = null; // team pages re-fetch too
+    S.leagueGames = games; // league-schedule games, used for head-to-head tiebreakers
     S.games = (S.scheduleId === 'outside' ? outside : games.concat(outside))
       .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
     S.standings = Object.fromEntries(ids.map((id, i) => [id, stand[i]]));
@@ -619,12 +624,79 @@ function cleanRows(rows) {
 }
 const rankOf = r => r.manualRanking ?? r.ranking ?? 999;
 
-function standingsTable(rows, tid) {
-  rows = rows.slice().sort((a, b) => rankOf(a) - rankOf(b) || (b.points - a.points));
+/**
+ * PCAHA standings order (one schedule's group of teams):
+ *  (a) most points, (b) most wins, (c) fewest losses, then among the teams still tied,
+ *  using only the games they played against each other (head-to-head):
+ *  (i) best winning percentage (ties count as half a win), (ii) best goals-for share,
+ *  GF / (GF + GA), (iii) fewest goals against; then (iv) fewest goals against overall.
+ * When a step splits a tie of three or more, the teams still tied start again at (i)
+ * using only their own games against each other. A step is skipped if a tied team
+ * hasn't played any of the others. Teams still level keep Spordle's order.
+ */
+function pcahaOrder(rows, games) {
+  const base = (a, b) => (b.points || 0) - (a.points || 0) || (b.wins || 0) - (a.wins || 0) || (a.losses || 0) - (b.losses || 0);
+  const sorted = rows.slice().sort((a, b) => base(a, b) || rankOf(a) - rankOf(b));
+  const out = [];
+  for (let i = 0; i < sorted.length;) {
+    let j = i + 1;
+    while (j < sorted.length && base(sorted[i], sorted[j]) === 0) j++;
+    const tied = sorted.slice(i, j);
+    if (tied.length > 1) tied.forEach(r => r._tied = true);
+    out.push(...breakTie(tied, games, 0));
+    i = j;
+  }
+  return out;
+}
+const round9 = v => v == null ? null : Math.round(v * 1e9) / 1e9;
+const TIEBREAKS = [
+  { name: 'head-to-head winning %', h2h: true, high: true, val: s => s.gp ? (s.w + s.t / 2) / s.gp : null },
+  { name: 'head-to-head goals-for %', h2h: true, high: true, val: s => s.gp ? (s.gf + s.ga ? s.gf / (s.gf + s.ga) : 0.5) : null },
+  { name: 'head-to-head goals against', h2h: true, high: false, val: s => s.gp ? s.ga : null },
+  { name: 'goals against (all games)', h2h: false, high: false, val: (s, r) => r.goalAgainst || 0 },
+];
+function breakTie(group, games, start) {
+  if (group.length < 2) return group;
+  const ids = new Set(group.map(r => r.teamId));
+  const st = new Map(group.map(r => [r.teamId, { gp: 0, w: 0, t: 0, gf: 0, ga: 0 }]));
+  for (const g of games) {
+    if (!ids.has(g.homeTeamId) || !ids.has(g.awayTeamId) || status(g) !== 'final') continue;
+    const hs = scoreOf(g, g.homeTeamId), as = scoreOf(g, g.awayTeamId);
+    if (hs == null || as == null) continue;
+    for (const [me, f, a] of [[g.homeTeamId, hs, as], [g.awayTeamId, as, hs]]) {
+      const s = st.get(me); s.gp++; s.gf += f; s.ga += a;
+      if (f > a) s.w++; else if (f === a) s.t++;
+    }
+  }
+  for (let c = start; c < TIEBREAKS.length; c++) {
+    const tb = TIEBREAKS[c];
+    const vals = group.map(r => round9(tb.val(st.get(r.teamId), r)));
+    if (vals.some(v => v == null)) continue; // someone hasn't played the others: skip this step
+    const distinct = [...new Set(vals)].sort((x, y) => tb.high ? y - x : x - y);
+    if (distinct.length < 2) continue;
+    return distinct.flatMap(v => {
+      const sub = group.filter((r, k) => vals[k] === v);
+      if (sub.length === 1) sub[0]._tb = tb.name; // the step that settled this team's place
+      // A smaller tie starts again at (i) with only its own head-to-head games.
+      return sub.length > 1 ? breakTie(sub, games, tb.h2h ? 0 : c + 1) : sub;
+    });
+  }
+  return group;
+}
+
+// Leagues whose standings follow PCAHA's tiebreak rules (the PCEHL is part of the PCAHA).
+const PCAHA_RULES = ['pcaha', 'pcehl'];
+
+function standingsTable(rows, tid, scheduleId) {
+  const usePcaha = PCAHA_RULES.includes(S.league);
+  rows = rows.map(r => Object.assign({}, r, { _tied: false, _tb: null }));
+  rows = usePcaha ? pcahaOrder(rows, (S.leagueGames || []).filter(g => g.scheduleId === scheduleId))
+    : rows.sort((a, b) => rankOf(a) - rankOf(b) || (b.points - a.points));
   return el('div', { class: 'tablewrap' }, el('table', {},
     el('thead', {}, el('tr', {}, ...['#', 'Team', 'GP', 'W', 'L', 'T', 'GF', 'GA', 'Diff', 'SP', 'Pts'].map((h, i) => el('th', { class: i === 1 ? 't' : '', title: h === 'SP' ? 'Sportsmanship points' : null }, h)))),
-    el('tbody', {}, ...rows.map((r, i) => el('tr', { class: r.teamId === tid ? 'me' : '' },
-      el('td', { class: 'rk' }, String(rankOf(r) === 999 ? i + 1 : rankOf(r))),
+    el('tbody', {}, ...rows.map((r, i) => el('tr', { class: r.teamId === tid ? 'me' : '',
+      title: r._tied ? 'Tied on points, wins and losses' + (r._tb ? ` – placed by ${r._tb}` : ' – still level after all tiebreakers') : null },
+      el('td', { class: 'rk' }, String(usePcaha || rankOf(r) === 999 ? i + 1 : rankOf(r)) + (r._tied ? '*' : '')),
       el('td', { class: 't' }, teamLink(r.team)),
       el('td', {}, n(r.gamesPlayed)), el('td', {}, n(r.wins)), el('td', {}, n(r.losses)), el('td', {}, n(r.ties)),
       el('td', {}, n(r.goalFor)), el('td', {}, n(r.goalAgainst)), el('td', {}, r.diff > 0 ? '+' + r.diff : n(r.diff)),
@@ -646,7 +718,7 @@ function renderStandings() {
       flights.get(key).rows.push(r);
     }
     frag.append(el('div', { class: 'sched-h' }, s.name));
-    if (flights.size <= 1) { frag.append(standingsTable(rows, tid)); continue; }
+    if (flights.size <= 1) { frag.append(standingsTable(rows, tid, s.id)); continue; }
 
     const list = [...flights.values()].sort((a, b) =>
       (a.name == null) - (b.name == null) || String(a.name).localeCompare(String(b.name), 'en', { numeric: true }));
@@ -658,9 +730,12 @@ function renderStandings() {
         el('summary', {}, el('span', { class: 'fname' }, f.name || 'No flight'),
           mine ? el('span', { class: 'badge final' }, 'Your team') : '',
           el('span', { class: 'fcount' }, `${f.rows.length} team${f.rows.length === 1 ? '' : 's'}`)),
-        standingsTable(f.rows, tid)));
+        standingsTable(f.rows, tid, s.id)));
     }
   }
+  if (PCAHA_RULES.includes(S.league)) frag.append(el('div', { class: 'statnote' },
+    'Order follows PCAHA rules: points, then wins, then fewest losses. * Teams still tied are placed by head-to-head ' +
+    'games (winning %, then goals-for %, then goals against), then by fewest goals against overall.'));
   return frag;
 }
 const n = v => v == null ? '0' : String(v);
