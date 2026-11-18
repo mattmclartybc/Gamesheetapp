@@ -234,17 +234,31 @@ async function updateLeague(lg, prev) {
 const STATS_VERSION = 2;
 const key = s => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
 
+// Empty-net goals scored against each team, by game: "<game>|<scoring team>" -> count.
+function emptyNetGoals(goals) {
+  const en = {};
+  for (const r of goals) if (/\bEN\b/.test(String(r[11]))) { const k = r[0] + '|' + r[5]; en[k] = (en[k] || 0) + 1; }
+  return en;
+}
+
+// W/L/T come from the final score. Goals against (and so GAA and shutouts) leave out
+// empty-net goals, since the goalie wasn't in net for them.
 function goalieStats(lg, members) {
+  const en = emptyNetGoals(lg.goals);
   const by = {};
-  const add = (name, team, div, stage, gf, ga) => {
+  const add = (id, name, team, div, stage, gf, ga, opponent) => {
     if (!name || !members.has(team)) return;
     const k = key(name) + '|' + team + '|' + stage;
     const s = by[k] || (by[k] = [name, team, div, stage, 0, 0, 0, 0, 0, 0]);
-    s[4]++; s[8] += ga;
+    const charged = Math.max(0, ga - (en[id + '|' + opponent] || 0));
+    s[4]++; s[8] += charged;
     if (gf > ga) s[5]++; else if (gf < ga) s[6]++; else s[7]++;
-    if (ga === 0) s[9]++;
+    if (charged === 0) s[9]++;
   };
-  for (const r of lg.games) { add(r[7], r[5], r[2], r[4], r[6], r[9]); add(r[10], r[8], r[2], r[4], r[9], r[6]); }
+  for (const r of lg.games) {
+    add(r[0], r[7], r[5], r[2], r[4], r[6], r[9], r[8]);
+    add(r[0], r[10], r[8], r[2], r[4], r[9], r[6], r[5]);
+  }
   return Object.values(by);
 }
 
