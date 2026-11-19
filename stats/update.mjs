@@ -15,6 +15,12 @@ const LEAGUES = [
 ];
 const OUT = process.env.STATS_OUT || 'stats/data.json';
 const PARALLEL = 6;
+// A game is only saved once it's over: not flagged live, and at least this long past its
+// scheduled end (Spordle fills in scores live during a game).
+const FINISHED_AFTER_MS = 30 * 60 * 1000;
+// Games from the last few days are downloaded again on every run, to pick up corrections
+// scorekeepers make after the game (a changed assist, a fixed goalie...).
+const RECHECK_DAYS = 3;
 const DATA_VERSION = 3; // bump when the saved fields change, to re-download everything once
 
 // Penalty minutes charged to the player, matching Spordle's own PIM totals.
@@ -193,13 +199,19 @@ async function updateLeague(lg, prev) {
 
   const now = Date.now();
   const hasScore = g => g.score && Object.keys(g.score).length === 2;
-  const played = games.filter(g => g.status === 'Active' && new Date(g.startTime).getTime() < now && hasScore(g));
+  const endOf = g => new Date(g.endTime || new Date(g.startTime).getTime() + 2 * 3600e3).getTime();
+  const played = games.filter(g => g.status === 'Active' && hasScore(g) && !g.isLive && endOf(g) + FINISHED_AFTER_MS < now);
   const pending = games // league games only; outside hosts don't always enter scores
     .filter(g => g._type && g.status === 'Active' && !hasScore(g) && new Date(g.startTime).getTime() < now - 2 * 864e5)
     .map(g => [g.id, g.date, g._division, `${teamLabel(g.awayTeam)} @ ${teamLabel(g.homeTeam)}`]);
 
-  const have = new Set(prev.games.map(r => r[0]));
-  const todo = played.filter(g => !have.has(g.id));
+  const saved = new Map(prev.games.map(r => [r[0], r]));
+  const todo = played.filter(g => {
+    const r = saved.get(g.id);
+    if (!r) return true;                                                                 // new game
+    if (r[6] !== g.score[g.homeTeamId] || r[9] !== g.score[g.awayTeamId]) return true;   // score changed, e.g. saved mid-game
+    return new Date(g.startTime).getTime() > now - RECHECK_DAYS * 864e5;                 // recent: check for corrections
+  });
   const built = await inPool(todo, PARALLEL, async g => {
     try {
       const [box, lineups] = await Promise.all([api(`/games/${g.id}/boxScore`), api(`/games/${g.id}/lineups`)]);
@@ -209,22 +221,47 @@ async function updateLeague(lg, prev) {
 
   const order = (a, b) => String(a[1]).localeCompare(String(b[1])) || a[0] - b[0];
   const added = built.filter(Boolean);
+  const redone = new Set(added.map(x => x.gameRow[0])); // replaces whatever was saved for these games
+  const keep = r => !redone.has(r[0]);
   const lineups = {};
   for (const id in prev.lineups) lineups[id] = prev.lineups[id].filter(r => isPlayer(r[2])); // drops staff saved by older versions
   added.forEach(x => { lineups[x.gameRow[0]] = x.lineupRows; });
   const out = {
     version: DATA_VERSION,
     season,
-    games: prev.games.concat(added.map(x => x.gameRow)).sort(order),
-    goals: prev.goals.concat(added.flatMap(x => x.goalRows)).sort(order), // stable sort keeps goals in game order
-    penalties: prev.penalties.concat(added.flatMap(x => x.penaltyRows)).sort(order),
+    games: prev.games.filter(keep).concat(added.map(x => x.gameRow)).sort(order),
+    goals: prev.goals.filter(keep).concat(added.flatMap(x => x.goalRows)).sort(order), // stable sort keeps goals in game order
+    penalties: prev.penalties.filter(keep).concat(added.flatMap(x => x.penaltyRows)).sort(order),
     lineups,
     pending,
     teams: [...memberIds.values()].map(teamLabel).sort(),
   };
   console.log(`${lg.name} ${season}: ${memberIds.size} teams, ${outside.size} games outside the league's schedules, ` +
-    `${played.length} played games, ${added.length} new, ${out.games.length} saved, ${pending.length} waiting for a score`);
+    `${played.length} finished games, ${added.filter(x => !saved.has(x.gameRow[0])).length} new, ` +
+    `${added.filter(x => saved.has(x.gameRow[0])).length} re-checked, ${out.games.length} saved, ${pending.length} waiting for a score`);
+  out.revs = gameRevisions(out);
   return out;
+}
+
+/**
+ * A short fingerprint of everything saved for each game. The Google Sheet compares
+ * these to spot games whose data changed, and replaces just those games' rows.
+ */
+function gameRevisions(lg) {
+  const parts = {};
+  const add = (id, x) => (parts[id] = parts[id] || []).push(x);
+  lg.games.forEach(r => add(r[0], r));
+  lg.goals.forEach(r => add(r[0], r));
+  lg.penalties.forEach(r => add(r[0], r));
+  for (const id in lg.lineups) add(id, lg.lineups[id]);
+  const revs = {};
+  for (const r of lg.games) {
+    const s = JSON.stringify(parts[r[0]]);
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+    revs[r[0]] = h.toString(36);
+  }
+  return revs;
 }
 
 // ---------- stats for the web app (same rules as the Google Sheet) ----------
