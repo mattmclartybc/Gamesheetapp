@@ -9,11 +9,14 @@ import fs from 'node:fs';
 
 const API = 'https://pub-api.play.spordle.com/api/sp';
 const API_KEY = 'f08ed9064e3cdc382e6abb305ff543d0150fb52f'; // public, read-only key published by page.spordle.com
+// Each league gets its own pair of files in stats/: data-<key>.json (raw games, for the
+// Google Sheet) and stats-<key>.json (player and goalie stats, for the web app).
 const LEAGUES = [
-  { name: 'PCAHA A', officeId: 786 },
-  { name: 'PCEHL', officeId: 8585 },
+  { key: 'pcaha', name: 'PCAHA A', officeId: 786 },
+  { key: 'pcehl', name: 'PCEHL', officeId: 8585 },
+  { key: 'fvw', name: 'FVW C', officeId: 780 },
 ];
-const OUT = process.env.STATS_OUT || 'stats/data.json';
+const DIR = process.env.STATS_DIR || 'stats';
 const PARALLEL = 6;
 // A game is only saved once it's over: not flagged live, and at least this long past its
 // scheduled end (Spordle fills in scores live during a game).
@@ -338,27 +341,37 @@ function playerStats(lg, members) {
     .map(s => { s.row[7] = s.row[5] + s.row[6]; return s.row; });
 }
 
-const prev = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : { leagues: {} };
-const data = { updated: new Date().toISOString(), leagues: {} };
-for (const lg of LEAGUES) data.leagues[lg.name] = await updateLeague(lg, prev.leagues && prev.leagues[lg.name]);
-// Only rewrite the files when something changed, so the workflow doesn't commit every hour.
-const STATS_OUT = OUT.replace(/data\.json$/, 'stats.json');
-const changed = JSON.stringify(data.leagues) !== JSON.stringify(prev.leagues);
-if (changed) {
-  fs.writeFileSync(OUT, JSON.stringify(data));
-  console.log('Saved ' + OUT);
-} else {
-  console.log('No changes');
-}
-let oldStats = null;
-try { oldStats = JSON.parse(fs.readFileSync(STATS_OUT, 'utf8')); } catch (e) { /* none yet */ }
-if (changed || !oldStats || oldStats.version !== STATS_VERSION) {
-  const stats = { version: STATS_VERSION, updated: data.updated, leagues: {} };
-  for (const name in data.leagues) {
-    const lg = data.leagues[name];
-    const members = new Set(lg.teams || []);
-    stats.leagues[name] = { players: playerStats(lg, members), goalies: goalieStats(lg, members) };
+// ---------- main ----------
+const readJson = f => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return null; } };
+const legacy = readJson(`${DIR}/data.json`); // single file used by earlier versions
+let failed = false;
+for (const lg of LEAGUES) {
+  const dataFile = `${DIR}/data-${lg.key}.json`, statsFile = `${DIR}/stats-${lg.key}.json`;
+  const saved = readJson(dataFile);
+  const prev = saved ? saved.league : legacy && legacy.leagues && legacy.leagues[lg.name];
+  let league;
+  try {
+    league = await updateLeague(lg, prev);
+  } catch (e) {
+    console.error(`${lg.name}: update failed, keeping the saved data (${e.message})`);
+    failed = true;
+    continue;
   }
-  fs.writeFileSync(STATS_OUT, JSON.stringify(stats));
-  console.log('Saved ' + STATS_OUT);
+  const updated = new Date().toISOString();
+  // Only rewrite files when something changed, so the workflow doesn't commit every hour.
+  const changed = !saved || JSON.stringify(league) !== JSON.stringify(saved.league);
+  if (changed) {
+    fs.writeFileSync(dataFile, JSON.stringify({ updated, name: lg.name, league }));
+    console.log('  saved ' + dataFile);
+  }
+  const oldStats = readJson(statsFile);
+  if (changed || !oldStats || oldStats.version !== STATS_VERSION) {
+    const members = new Set(league.teams || []);
+    const stats = { version: STATS_VERSION, updated, leagues: {
+      [lg.name]: { players: playerStats(league, members), goalies: goalieStats(league, members) } } };
+    fs.writeFileSync(statsFile, JSON.stringify(stats));
+    console.log('  saved ' + statsFile);
+  }
 }
+// The old combined files are replaced by the per-league ones.
+if (!failed) for (const f of ['data.json', 'stats.json']) if (fs.existsSync(`${DIR}/${f}`)) { fs.unlinkSync(`${DIR}/${f}`); console.log(`removed ${DIR}/${f}`); }
