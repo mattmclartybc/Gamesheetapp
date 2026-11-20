@@ -238,6 +238,7 @@ const LEAGUES = [
   { key: 'pcehl', name: 'PCEHL', short: 'pacific-coast-elite-hockey-league', officeId: 8585,
     nameLike: ['%PACIFIC COAST ELITE%', '%Pacific Coast Elite%', '%PCEHL%'], nameMatch: /pacific coast elite|pcehl/i,
     defaultCategoryMatch: /U13/i },
+  { key: 'fvw', name: 'FVW C', short: 'fraser-valley-west', officeId: 780, defaultCategoryMatch: /U13/i },
 ];
 const SHEET_URL = id => `https://pdf.hisports.app/game/${id}`;
 const GAME_URL  = id => `https://page.spordle.com/${L().short}/schedule/${id}`;
@@ -271,7 +272,7 @@ const S = {
   flight: '',                // '' = all flights, otherwise "<scheduleId>:<groupId>"            // { id, games, standings } for the open team page
   statsMode: store.get('statsMode', 'players'),
   sort: {},
-  stats: null, statsError: null, statsLoading: false,
+  stats: null, statsFor: null, statsError: null, statsLoading: false,
   stages: store.get('stages', null), // stats stages to include; null = all
 };
 
@@ -727,7 +728,7 @@ function breakTie(group, games, start) {
 }
 
 // Leagues whose standings follow PCAHA's tiebreak rules (the PCEHL is part of the PCAHA).
-const PCAHA_RULES = ['pcaha', 'pcehl'];
+const PCAHA_RULES = ['pcaha', 'pcehl', 'fvw'];
 
 function standingsTable(rows, tid, scheduleId) {
   const usePcaha = PCAHA_RULES.includes(S.league);
@@ -925,7 +926,7 @@ function renderTeamPage() {
 }
 
 /* ---------- player & goalie stats (stats/stats.json, built by the GitHub workflow) ---------- */
-const LEAGUE_STATS_NAME = { pcaha: 'PCAHA A', pcehl: 'PCEHL' };
+const LEAGUE_STATS_NAME = { pcaha: 'PCAHA A', pcehl: 'PCEHL', fvw: 'FVW C' };
 const STAT_COLS = {
   // i = column in stats.json rows: players [name, team, div, GP, G, A, PTS, PIM]; goalies [name, team, div, GP, W, L, T, GA, GAA, SO]
   players: [
@@ -980,19 +981,24 @@ function stageChips(lg) {
 const DEFAULT_SORT = { players: { i: 6, dir: -1 }, goalies: { i: 4, dir: -1 } };
 const TIEBREAK = { players: [6, 4, 3], goalies: [4, 8, 3] };
 
+// Each league's stats are in their own file (stats/stats-<key>.json), loaded when needed.
 async function loadStats() {
-  if (S.stats || S.statsLoading) return;
-  S.statsLoading = true;
+  const key = S.league;
+  if (S.statsFor === key && (S.stats || S.statsLoading)) return;
+  S.statsFor = key; S.stats = null; S.statsError = null; S.statsLoading = true;
+  let data = null, error = null;
   try {
-    const r = await fetch('stats/stats.json', { cache: 'no-cache' });
+    let r = await fetch(`stats/stats-${key}.json`, { cache: 'no-cache' });
+    if (r.status === 404) r = await fetch('stats/stats.json', { cache: 'no-cache' }); // before the split files exist
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    S.stats = await r.json(); S.statsError = null;
+    data = await r.json();
   } catch (e) {
-    S.statsError = location.protocol === 'file:'
+    error = location.protocol === 'file:'
       ? 'Stats only load on the published site (not when the file is opened from your computer).'
       : 'Couldn’t load stats: ' + e.message;
   }
-  S.statsLoading = false;
+  if (S.statsFor !== key) return; // league changed while loading
+  S.stats = data; S.statsError = error; S.statsLoading = false;
   render();
 }
 
@@ -1007,8 +1013,8 @@ function renderStatsTab() {
 
 /** A sortable stats table for one division, optionally limited to one team. */
 function statsBlock(mode, { division, team, search }) {
-  if (!S.stats) {
-    if (!S.statsError) { loadStats(); return el('div', { class: 'skel' }); }
+  if (S.statsFor !== S.league || !S.stats) {
+    if (S.statsFor !== S.league || !S.statsError) { loadStats(); return el('div', { class: 'skel' }); }
     return el('div', { class: 'empty' }, S.statsError);
   }
   const lg = S.stats.leagues[LEAGUE_STATS_NAME[S.league]];
